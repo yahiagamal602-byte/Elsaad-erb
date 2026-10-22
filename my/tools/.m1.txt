@@ -1,0 +1,141 @@
+1600 |     await showPage('brokerage');
+1601 |     return;
+1602 |   }
+1603 |   const portfolioPage = target.closest<HTMLElement>('[data-portfolio-view]');
+1604 |   if (portfolioPage?.dataset.portfolioView === 'properties' || portfolioPage?.dataset.portfolioView === 'projects') {
+1605 |     currentPortfolioView = portfolioPage.dataset.portfolioView;
+1606 |     currentProjectView = currentPortfolioView;
+1607 |     await refreshPortfolioPage();
+1608 |     return;
+1609 |   }
+1610 |   const projectPageButton = target.closest<HTMLElement>('[data-project-view]');
+1611 |   if (projectPageButton?.dataset.projectView) {
+1612 |     const requested = projectPageButton.dataset.projectView;
+1613 |     if (requested === 'project-list' || requested === 'project-material-issues' || requested === 'work-items'
+1614 |       || requested === 'property-units' || requested === 'property-contracts' || requested === 'property-payments') {
+1615 |       currentProjectView = requested;
+1616 |       await showPage('projects');
+1617 |     }
+1618 |     return;
+1619 |   }
+1620 |   const dashboardPage = target.closest<HTMLElement>('[data-dashboard-view]');
+1621 |   if (dashboardPage?.dataset.dashboardView) {
+1622 |     event.preventDefault();
+1623 |     const requestedView = dashboardPage.dataset.dashboardView;
+1624 |     if (requestedView === 'dashboard-new' || requestedView === 'dashboard-2') {
+1625 |       currentDashboardView = requestedView;
+1626 |       currentPage = 'dashboard';
+1627 |       await showPage('dashboard');
+1628 |     }
+1629 |     return;
+1630 |   }
+1631 | 
+1632 |   const pageButton = target.closest<HTMLElement>('[data-page]');
+1633 |   if (pageButton?.dataset.page) {
+1634 |     const page = MODULES.find(({ key }) => key === pageButton.dataset.page)?.key;
+1635 |     if (page) await showPage(page);
+1636 |     return;
+1637 |   }
+1638 | 
+1639 |   const actionButton = target.closest<HTMLElement>('[data-action]');
+1640 |   if (!actionButton) return;
+1641 |   if (actionButton.closest('.account-tree-node summary')) event.preventDefault();
+1642 |   const { action, id } = actionButton.dataset;
+1643 |   if (action === 'financial-document-exit') {
+1644 |     await showPage('dashboard');
+1645 |   } else if (action === 'financial-voucher-refresh' || action === 'expense-refresh') {
+1646 |     await showPage(currentPage);
+1647 |   } else if (action === 'financial-voucher-new') {
+1648 |     const kind: FinancialVoucherParty = currentPage === 'customer-vouchers' ? 'customer' : 'supplier';
+1649 |     const parties = kind === 'customer' ? customers : suppliers;
+1650 |     document.querySelector<HTMLElement>('#financial-voucher-editor-host')!.innerHTML =
+1651 |       renderFinancialVoucherEditor(kind, null, parties, cashBoxes, bankAccounts, costCenters, projects);
+1652 |   } else if (action === 'financial-voucher-edit' && id) {
+1653 |     const voucher = financialVouchers.find((item) => item.id === Number(id));
+1654 |     if (voucher) {
+1655 |       const kind = currentPage === 'customer-vouchers' ? 'customer' : 'supplier';
+1656 |       document.querySelector<HTMLElement>('#financial-voucher-editor-host')!.innerHTML =
+1657 |         renderFinancialVoucherEditor(kind, voucher, kind === 'customer' ? customers : suppliers, cashBoxes, bankAccounts, costCenters, projects);
+1658 |     }
+1659 |   } else if (action === 'financial-voucher-cancel') {
+1660 |     document.querySelector<HTMLElement>('#financial-voucher-modal')?.remove();
+1661 |   } else if (action === 'financial-voucher-approve' && id) {
+1662 |     const kind = actionButton.dataset.kind;
+1663 |     if (kind !== 'customer' && kind !== 'supplier') return;
+1664 |     if (!window.confirm('اعتماد السند وإنشاء القيد المحاسبي؟ سيتم الترحيل مرة واحدة.')) return;
+1665 |     try {
+1666 |       await window.elsaad.approveFinancialVoucher(Number(id), kind);
+1667 |       await showPage(currentPage);
+1668 |     } catch (error) {
+1669 |       window.alert(error instanceof Error ? error.message : 'تعذر اعتماد السند.');
+1670 |     }
+1671 |   } else if (action === 'financial-voucher-delete' && id) {
+1672 |     const kind = actionButton.dataset.kind;
+1673 |     if (kind !== 'customer' && kind !== 'supplier') return;
+1674 |     if (!window.confirm('حذف مسودة السند المحدد؟ السند المرحّل لا يمكن حذفه.')) return;
+1675 |     try {
+1676 |       await window.elsaad.deleteFinancialVoucher(Number(id), kind);
+1677 |       await showPage(currentPage);
+1678 |     } catch (error) {
+1679 |       window.alert(error instanceof Error ? error.message : 'تعذر حذف مسودة السند.');
+1680 |     }
+1681 |   } else if (action === 'financial-voucher-open' && id) {
+1682 |     const voucher = financialVouchers.find((item) => item.id === Number(id));
+1683 |     if (voucher?.journalEntryId) {
+1684 |       try {
+1685 |         const entry = await window.elsaad.getJournalEntry(voucher.journalEntryId);
+1686 |         document.querySelector<HTMLElement>('#financial-voucher-detail-host')!.innerHTML = renderJournalDetail(entry);
+1687 |       } catch (error) {
+1688 |         window.alert(error instanceof Error ? error.message : 'تعذر فتح القيد المرتبط بالسند.');
+1689 |       }
+1690 |     }
+1691 |   } else if (action === 'expense-new') {
+1692 |     document.querySelector<HTMLElement>('#expense-editor-host')!.innerHTML = renderExpenseEditor(null, accounts, cashBoxes, bankAccounts, costCenters, projects);
+1693 |     const form = document.querySelector<HTMLFormElement>('[data-form="expense"]');
+1694 |     if (form) updateExpenseTotals(form);
+1695 |   } else if ((action === 'expense-edit' || action === 'expense-open' || action === 'expense-duplicate') && id) {
+1696 |     const expense = expenses.find((item) => item.id === Number(id));
+1697 |     if (expense) {
+1698 |       const duplicate = action === 'expense-duplicate';
+1699 |       document.querySelector<HTMLElement>('#expense-editor-host')!.innerHTML = renderExpenseEditor(expense, accounts, cashBoxes, bankAccounts, costCenters, projects, duplicate);
+1700 |       const form = document.querySelector<HTMLFormElement>('[data-form="expense"]');
+1701 |       if (form) updateExpenseTotals(form);
+1702 |     }
+1703 |   } else if (action === 'expense-cancel') {
+1704 |     document.querySelector<HTMLElement>('#expense-modal')?.remove();
+1705 |   } else if (action === 'expense-allocation-add') {
+1706 |     document.querySelector<HTMLElement>('#expense-allocations')?.insertAdjacentHTML('beforeend', renderExpenseAllocationRow(accounts, costCenters, projects));
+1707 |     const form = document.querySelector<HTMLFormElement>('[data-form="expense"]');
+1708 |     if (form) updateExpenseTotals(form);
+1709 |   } else if (action === 'expense-allocation-remove') {
+1710 |     const rows = document.querySelectorAll('[data-expense-allocation]');
+1711 |     if (rows.length > 1) actionButton.closest<HTMLElement>('[data-expense-allocation]')?.remove();
+1712 |     const form = document.querySelector<HTMLFormElement>('[data-form="expense"]');
+1713 |     if (form) updateExpenseTotals(form);
+1714 |   } else if (action === 'expense-approve' && id) {
+1715 |     if (!window.confirm('اعتماد المصروف وإنشاء القيد المحاسبي؟ سيتم الترحيل مرة واحدة.')) return;
+1716 |     try {
+1717 |       await window.elsaad.approveExpense(Number(id));
+1718 |       await showPage('expenses');
+1719 |     } catch (error) {
+1720 |       window.alert(error instanceof Error ? error.message : 'تعذر اعتماد المصروف.');
+1721 |     }
+1722 |   } else if (action === 'expense-delete' && id) {
+1723 |     if (!window.confirm('حذف مسودة المصروف المحددة؟ المصروف المرحّل لا يمكن حذفه.')) return;
+1724 |     try {
+1725 |       await window.elsaad.deleteExpense(Number(id));
+1726 |       await showPage('expenses');
+1727 |     } catch (error) {
+1728 |       window.alert(error instanceof Error ? error.message : 'تعذر حذف مسودة المصروف.');
+1729 |     }
+1730 |   } else if (action === 'accounting-toggle') {
+1731 |     accountingExpanded = !accountingExpanded;
+1732 |     const submenu = document.querySelector<HTMLElement>('#accounting-subpages');
+1733 |     const button = actionButton as HTMLButtonElement;
+1734 |     button.setAttribute('aria-expanded', String(accountingExpanded));
+1735 |     submenu?.toggleAttribute('hidden', !accountingExpanded);
+1736 |     button.querySelector<SVGElement>('.nav-chevron')?.classList.toggle('nav-chevron--open', accountingExpanded);
+1737 |   } else if (action === 'accounting-clear-search') {
+1738 |     if (currentAccountingView === 'chart-of-accounts') accountSearch = '';
+1739 |     else if (currentAccountingView === 'cost-centers') costCenterSearch = '';
+1740 |     else if (currentAccountingView === 'daily-journals') journalSearch = '';

@@ -1,0 +1,504 @@
+1 | import { ipcMain } from 'electron';
+2 | import { DatabaseSync, type SQLOutputValue } from 'node:sqlite';
+3 | import { formatAmount, normalizeAmount, parseAmount } from '../src/shared/accounting.js';
+4 | import type {
+5 |   Expense,
+6 |   ExpenseAllocationInput,
+7 |   ExpenseInput,
+8 |   FinancialVoucher,
+9 |   FinancialVoucherInput,
+10 |   FinancialVoucherParty,
+11 | } from '../src/shared/types.js';
+12 | 
+13 | type Row = Record<string, SQLOutputValue>;
+14 | 
+15 | function transaction<T>(database: DatabaseSync, operation: () => T): T {
+16 |   database.exec('BEGIN IMMEDIATE');
+17 |   try {
+18 |     const result = operation();
+19 |     database.exec('COMMIT');
+20 |     return result;
+21 |   } catch (error) {
+22 |     try { database.exec('ROLLBACK'); } catch (rollbackError) {
+23 |       throw new Error('تعذر إكمال الحركة المالية أو التراجع عنها؛ تحقّق من قاعدة البيانات.', { cause: rollbackError });
+24 |     }
+25 |     throw error;
+26 |   }
+27 | }
+28 | 
+29 | function validId(value: unknown, label: string): number {
+30 |   if (!Number.isSafeInteger(value) || Number(value) < 1) throw new Error(`${label} غير صالح.`);
+31 |   return Number(value);
+32 | }
+33 | 
+34 | function validDate(value: unknown): value is string {
+35 |   if (typeof value !== 'string') return false;
+36 |   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+37 |   if (!match) return false;
+38 |   const [, year, month, day] = match.map(Number);
+39 |   const date = new Date(Date.UTC(year, month - 1, day));
+40 |   return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+41 | }
+42 | 
+43 | function postableAccount(database: DatabaseSync, id: number, type: 'asset' | 'liability' | 'expense', label: string): Row {
+44 |   const row = database.prepare(`SELECT account_type, postable,
+45 |     EXISTS(SELECT 1 FROM accounts child WHERE child.parent_id = accounts.id) AS has_children FROM accounts WHERE id = ?`).get(id) as Row | undefined;
+46 |   if (!row || row.account_type !== type || Number(row.postable) !== 1 || Number(row.has_children) === 1) {
+47 |     throw new Error(`${label} يجب أن يكون حسابًا تفصيليًا من نوع ${type === 'asset' ? 'أصول' : type === 'liability' ? 'التزامات' : 'مصروفات'} وقابلًا للترحيل.`);
+48 |   }
+49 |   return row;
+50 | }
+51 | 
+52 | function validateCenter(database: DatabaseSync, id: number | null): void {
+53 |   if (id === null) return;
+54 |   const row = database.prepare(`SELECT postable, EXISTS(SELECT 1 FROM cost_centers child WHERE child.parent_id = cost_centers.id) AS has_children
+55 |     FROM cost_centers WHERE id = ?`).get(id) as Row | undefined;
+56 |   if (!row) throw new Error('مركز التكلفة المحدد غير موجود.');
+57 |   if (Number(row.postable) !== 1 || Number(row.has_children) === 1) throw new Error('اختر مركز تكلفة تفصيليًا قابلًا للترحيل.');
+58 | }
+59 | 
+60 | function validateProject(database: DatabaseSync, id: number | null): void {
+61 |   if (id === null) return;
+62 |   const row = database.prepare('SELECT status FROM projects WHERE id = ?').get(id) as Row | undefined;
+63 |   if (!row || row.status === 'cancelled') throw new Error('المشروع المحدد غير موجود أو ملغي.');
+64 | }
+65 | 
+66 | function validatePayout(database: DatabaseSync, method: 'cash' | 'bank', cashBoxId: number | null, bankAccountId: number | null): number {
+67 |   if (method === 'cash') {
+68 |     if (cashBoxId === null || bankAccountId !== null) throw new Error('اختر خزينة نشطة فقط لطريقة الدفع النقدية.');
+69 |     const box = database.prepare('SELECT account_id, status, currency FROM treasury_cash_boxes WHERE id = ?').get(cashBoxId) as Row | undefined;
+70 |     if (!box || box.status !== 'active') throw new Error('الخزينة المحددة غير موجودة أو غير نشطة.');
+71 |     if (String(box.currency).toUpperCase() !== 'EGP') throw new Error('لا يمكن ترحيل عملة مختلفة لعدم توفر آلية سعر صرف معتمدة.');
+72 |     return Number(box.account_id);
+73 |   }
+74 |   if (bankAccountId === null || cashBoxId !== null) throw new Error('اختر بنكًا نشطًا فقط لطريقة الدفع البنكية.');
+75 |   const bank = database.prepare('SELECT account_id, status, currency FROM treasury_bank_accounts WHERE id = ?').get(bankAccountId) as Row | undefined;
+76 |   if (!bank || bank.status !== 'active') throw new Error('البنك المحدد غير موجود أو غير نشط.');
+77 |   if (String(bank.currency).toUpperCase() !== 'EGP') throw new Error('لا يمكن ترحيل عملة مختلفة لعدم توفر آلية سعر صرف معتمدة.');
+78 |   return Number(bank.account_id);
+79 | }
+80 | 
+81 | export function installFinancialDocumentSchema(database: DatabaseSync): void {
+82 |   database.exec(`
+83 |     CREATE TABLE IF NOT EXISTS financial_vouchers (
+84 |       id INTEGER PRIMARY KEY AUTOINCREMENT,
+85 |       number TEXT NOT NULL UNIQUE,
+86 |       party_kind TEXT NOT NULL CHECK (party_kind IN ('customer', 'supplier')),
+87 |       voucher_type TEXT NOT NULL CHECK (voucher_type IN ('receipt', 'payment')),
+88 |       voucher_date TEXT NOT NULL,
+89 |       customer_id INTEGER REFERENCES customers(id) ON DELETE RESTRICT,
+90 |       supplier_id INTEGER REFERENCES suppliers(id) ON DELETE RESTRICT,
+91 |       amount TEXT NOT NULL,
+92 |       payment_method TEXT NOT NULL CHECK (payment_method IN ('cash', 'bank')),
+93 |       cash_box_id INTEGER REFERENCES treasury_cash_boxes(id) ON DELETE RESTRICT,
+94 |       bank_account_id INTEGER REFERENCES treasury_bank_accounts(id) ON DELETE RESTRICT,
+95 |       cost_center_id INTEGER REFERENCES cost_centers(id) ON DELETE RESTRICT,
+96 |       project_id INTEGER REFERENCES projects(id) ON DELETE RESTRICT,
+97 |       reference TEXT NOT NULL DEFAULT '',
+98 |       notes TEXT NOT NULL DEFAULT '',
+99 |       status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'posted')),
+100 |       journal_entry_id INTEGER UNIQUE REFERENCES journal_entries(id) ON DELETE RESTRICT,
+101 |       created_at TEXT NOT NULL DEFAULT (datetime('now')),
+102 |       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+103 |       CHECK ((party_kind = 'customer' AND voucher_type = 'receipt' AND customer_id IS NOT NULL AND supplier_id IS NULL)
+104 |           OR (party_kind = 'supplier' AND voucher_type = 'payment' AND supplier_id IS NOT NULL AND customer_id IS NULL)),
+105 |       CHECK ((payment_method = 'cash' AND cash_box_id IS NOT NULL AND bank_account_id IS NULL)
+106 |           OR (payment_method = 'bank' AND bank_account_id IS NOT NULL AND cash_box_id IS NULL))
+107 |     );
+108 |     CREATE INDEX IF NOT EXISTS financial_vouchers_party_date ON financial_vouchers(party_kind, voucher_date DESC, id DESC);
+109 |     CREATE TABLE IF NOT EXISTS expenses (
+110 |       id INTEGER PRIMARY KEY AUTOINCREMENT,
+111 |       number TEXT NOT NULL UNIQUE,
+112 |       expense_date TEXT NOT NULL,
+113 |       operation_type TEXT NOT NULL,
+114 |       description TEXT NOT NULL,
+115 |       payment_method TEXT NOT NULL CHECK (payment_method IN ('cash', 'bank')),
+116 |       cash_box_id INTEGER REFERENCES treasury_cash_boxes(id) ON DELETE RESTRICT,
+117 |       bank_account_id INTEGER REFERENCES treasury_bank_accounts(id) ON DELETE RESTRICT,
+118 |       payable_account_id INTEGER REFERENCES accounts(id) ON DELETE RESTRICT,
+119 |       cost_center_id INTEGER REFERENCES cost_centers(id) ON DELETE RESTRICT,
+120 |       project_id INTEGER REFERENCES projects(id) ON DELETE RESTRICT,
+121 |       paid_amount TEXT NOT NULL,
+122 |       total_amount TEXT NOT NULL,
+123 |       currency TEXT NOT NULL DEFAULT 'EGP' CHECK (currency = 'EGP'),
+124 |       notes TEXT NOT NULL DEFAULT '',
+125 |       status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'posted')),
+126 |       journal_entry_id INTEGER UNIQUE REFERENCES journal_entries(id) ON DELETE RESTRICT,
+127 |       created_at TEXT NOT NULL DEFAULT (datetime('now')),
+128 |       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+129 |       CHECK ((payment_method = 'cash' AND (bank_account_id IS NULL)) OR (payment_method = 'bank' AND (cash_box_id IS NULL)))
+130 |     );
+131 |     CREATE INDEX IF NOT EXISTS expenses_date_status ON expenses(expense_date DESC, status, id DESC);
+132 |     CREATE TABLE IF NOT EXISTS expense_allocations (
+133 |       id INTEGER PRIMARY KEY AUTOINCREMENT,
+134 |       expense_id INTEGER NOT NULL REFERENCES expenses(id) ON DELETE CASCADE,
+135 |       expense_account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+136 |       project_id INTEGER REFERENCES projects(id) ON DELETE RESTRICT,
+137 |       cost_center_id INTEGER REFERENCES cost_centers(id) ON DELETE RESTRICT,
+138 |       amount TEXT NOT NULL,
+139 |       notes TEXT NOT NULL DEFAULT ''
+140 |     );
+141 |     CREATE INDEX IF NOT EXISTS expense_allocations_expense ON expense_allocations(expense_id, id);
+142 |   `);
+143 | }
+144 | 
+145 | function validateVoucher(database: DatabaseSync, partyKind: FinancialVoucherParty, value: unknown): FinancialVoucherInput {
+146 |   if (!value || typeof value !== 'object') throw new Error('بيانات السند غير صالحة.');
+147 |   const input = value as Partial<FinancialVoucherInput>;
+148 |   if (input.id !== undefined) validId(input.id, 'رقم السند');
+149 |   if (input.partyKind !== partyKind) throw new Error('نوع الطرف في السند غير صالح.');
+150 |   if (!validDate(input.date)) throw new Error('تاريخ السند غير صالح.');
+151 |   const partyId = validId(input.partyId, partyKind === 'customer' ? 'العميل' : 'المورد');
+152 |   if (typeof input.amount !== 'string' || parseAmount(input.amount) <= 0n) throw new Error('مبلغ السند يجب أن يكون أكبر من صفر.');
+153 |   if (input.paymentMethod !== 'cash' && input.paymentMethod !== 'bank') throw new Error('طريقة الدفع غير صالحة.');
+154 |   const cashBoxId = input.cashBoxId === null ? null : validId(input.cashBoxId, 'الخزينة');
+155 |   const bankAccountId = input.bankAccountId === null ? null : validId(input.bankAccountId, 'البنك');
+156 |   const costCenterId = input.costCenterId === null ? null : validId(input.costCenterId, 'مركز التكلفة');
+157 |   const projectId = input.projectId === null ? null : validId(input.projectId, 'المشروع');
+158 |   if (typeof input.reference !== 'string' || input.reference.length > 100) throw new Error('المرجع غير صالح.');
+159 |   if (typeof input.notes !== 'string' || input.notes.length > 2000) throw new Error('ملاحظات السند غير صالحة.');
+160 |   const party = partyKind === 'customer'
+161 |     ? database.prepare('SELECT status, account_id FROM customers WHERE id = ?').get(partyId) as Row | undefined
+162 |     : database.prepare('SELECT status, account_id FROM suppliers WHERE id = ?').get(partyId) as Row | undefined;
+163 |   if (!party || party.status !== 'active') throw new Error('العميل أو المورد المحدد غير موجود أو غير نشط.');
+164 |   if (party.account_id === null) throw new Error('اربط الطرف بحسابه المحاسبي أولًا.');
+165 |   postableAccount(database, Number(party.account_id), partyKind === 'customer' ? 'asset' : 'liability', 'حساب الطرف');
+166 |   const payoutAccountId = validatePayout(database, input.paymentMethod, cashBoxId, bankAccountId);
+167 |   postableAccount(database, payoutAccountId, 'asset', 'حساب الخزينة أو البنك');
+168 |   validateCenter(database, costCenterId);
+169 |   validateProject(database, projectId);
+170 |   return {
+171 |     ...(input.id === undefined ? {} : { id: Number(input.id) }), partyKind, date: input.date,
+172 |     partyId, amount: normalizeAmount(input.amount), paymentMethod: input.paymentMethod,
+173 |     cashBoxId, bankAccountId, costCenterId, projectId, reference: input.reference.trim(), notes: input.notes.trim(),
+174 |   };
+175 | }
+176 | 
+177 | function voucherQuery(partyKind: FinancialVoucherParty): string {
+178 |   return `SELECT vouchers.*, COALESCE(customers.code, suppliers.code, '') AS party_code,
+179 |       COALESCE(customers.name, suppliers.name, '') AS party_name,
+180 |       COALESCE(customers.account_id, suppliers.account_id) AS party_account_id,
+181 |       COALESCE(boxes.name, banks.name, '') AS payout_name,
+182 |       COALESCE(boxes.currency, banks.currency, 'EGP') AS payout_currency
+183 |     FROM financial_vouchers vouchers
+184 |     LEFT JOIN customers ON customers.id = vouchers.customer_id
+185 |     LEFT JOIN suppliers ON suppliers.id = vouchers.supplier_id
+186 |     LEFT JOIN treasury_cash_boxes boxes ON boxes.id = vouchers.cash_box_id
+187 |     LEFT JOIN treasury_bank_accounts banks ON banks.id = vouchers.bank_account_id
+188 |     WHERE vouchers.party_kind = '${partyKind}'`;
+189 | }
+190 | 
+191 | function readVoucher(database: DatabaseSync, id: number, partyKind: FinancialVoucherParty): FinancialVoucher {
+192 |   const row = database.prepare(`${voucherQuery(partyKind)} AND vouchers.id = ?`).get(id) as Row | undefined;
+193 |   if (!row) throw new Error('السند المطلوب غير موجود.');
+194 |   return {
+195 |     id: Number(row.id), number: String(row.number), partyKind,
+196 |     date: String(row.voucher_date), partyId: Number(partyKind === 'customer' ? row.customer_id : row.supplier_id),
+197 |     amount: String(row.amount), paymentMethod: String(row.payment_method) as FinancialVoucher['paymentMethod'],
+198 |     cashBoxId: row.cash_box_id === null ? null : Number(row.cash_box_id), bankAccountId: row.bank_account_id === null ? null : Number(row.bank_account_id),
+199 |     costCenterId: row.cost_center_id === null ? null : Number(row.cost_center_id), projectId: row.project_id === null ? null : Number(row.project_id),
+200 |     reference: String(row.reference), notes: String(row.notes), partyCode: String(row.party_code), partyName: String(row.party_name),
+201 |     partyAccountId: Number(row.party_account_id), payoutAccountName: String(row.payout_name), payoutCurrency: String(row.payout_currency),
+202 |     status: String(row.status) as FinancialVoucher['status'], journalEntryId: row.journal_entry_id === null ? null : Number(row.journal_entry_id),
+203 |     createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+204 |   };
+205 | }
+206 | 
+207 | function validateExpense(database: DatabaseSync, value: unknown): ExpenseInput & { totalAmount: string } {
+208 |   if (!value || typeof value !== 'object') throw new Error('بيانات المصروف غير صالحة.');
+209 |   const input = value as Partial<ExpenseInput> & { totalAmount?: unknown };
+210 |   if (input.id !== undefined) validId(input.id, 'رقم المصروف');
+211 |   if (!validDate(input.date)) throw new Error('تاريخ المصروف غير صالح.');
+212 |   if (typeof input.operationType !== 'string' || !input.operationType.trim() || input.operationType.length > 100) throw new Error('أدخل نوع العملية.');
+213 |   if (typeof input.description !== 'string' || !input.description.trim() || input.description.length > 300) throw new Error('أدخل اسم بند المصروف.');
+214 |   if (input.paymentMethod !== 'cash' && input.paymentMethod !== 'bank') throw new Error('طريقة الدفع غير صالحة.');
+215 |   const cashBoxId = input.cashBoxId === null ? null : validId(input.cashBoxId, 'الخزينة');
+216 |   const bankAccountId = input.bankAccountId === null ? null : validId(input.bankAccountId, 'البنك');
+217 |   const payableAccountId = input.payableAccountId === null ? null : validId(input.payableAccountId, 'حساب الالتزام');
+218 |   const costCenterId = input.costCenterId === null ? null : validId(input.costCenterId, 'مركز التكلفة');
+219 |   const projectId = input.projectId === null ? null : validId(input.projectId, 'المشروع');
+220 |   if (typeof input.paidAmount !== 'string' || typeof input.totalAmount !== 'string') throw new Error('مبالغ المصروف غير صالحة.');
+221 |   const paid = parseAmount(input.paidAmount);
+222 |   if (!Array.isArray(input.allocations) || input.allocations.length < 1 || input.allocations.length > 200) throw new Error('أضف توزيعًا واحدًا على الأقل للمصروف.');
+223 |   const allocations: ExpenseAllocationInput[] = [];
+224 |   let total = 0n;
+225 |   for (const valueLine of input.allocations) {
+226 |     if (!valueLine || typeof valueLine !== 'object') throw new Error('أحد توزيعات المصروف غير صالح.');
+227 |     const line = valueLine as Partial<ExpenseAllocationInput>;
+228 |     const expenseAccountId = validId(line.expenseAccountId, 'حساب المصروف');
+229 |     const account = postableAccount(database, expenseAccountId, 'expense', 'حساب المصروف');
+230 |     void account;
+231 |     const lineProject = line.projectId === null ? projectId : validId(line.projectId, 'مشروع التوزيع');
+232 |     const lineCenter = line.costCenterId === null ? costCenterId : validId(line.costCenterId, 'مركز توزيع');
+233 |     validateProject(database, lineProject);
+234 |     validateCenter(database, lineCenter);
+235 |     if (typeof line.amount !== 'string' || parseAmount(line.amount) <= 0n) throw new Error('مبلغ التوزيع يجب أن يكون أكبر من صفر.');
+236 |     if (typeof line.notes !== 'string' || line.notes.length > 500) throw new Error('ملاحظات التوزيع غير صالحة.');
+237 |     const amount = normalizeAmount(line.amount);
+238 |     total += parseAmount(amount);
+239 |     allocations.push({ expenseAccountId, projectId: lineProject, costCenterId: lineCenter, amount, notes: line.notes.trim() });
+240 |   }
+241 |   if (typeof input.totalAmount !== 'string' || parseAmount(input.totalAmount) <= 0n) throw new Error('إجمالي المصروف يجب أن يكون أكبر من صفر.');
+242 |   const requestedTotal = parseAmount(input.totalAmount);
+243 |   if (total !== requestedTotal) throw new Error('مجموع توزيعات الأوامر يجب أن يساوي إجمالي المصروف بالضبط.');
+244 |   if (paid > total) throw new Error('المبلغ المدفوع لا يمكن أن يتجاوز إجمالي المصروف.');
+245 |   if (paid < total) {
+246 |     if (payableAccountId === null) throw new Error('اختر حساب الالتزام للمبلغ المتبقي غير المدفوع.');
+247 |     postableAccount(database, payableAccountId, 'liability', 'حساب الالتزام');
+248 |   }
+249 |   if (paid > 0n) {
+250 |     const payout = validatePayout(database, input.paymentMethod, cashBoxId, bankAccountId);
+251 |     postableAccount(database, payout, 'asset', 'حساب الخزينة أو البنك');
+252 |   }
+253 |   validateCenter(database, costCenterId);
+254 |   validateProject(database, projectId);
+255 |   return {
+256 |     ...(input.id === undefined ? {} : { id: Number(input.id) }), date: input.date,
+257 |     operationType: input.operationType.trim(), description: input.description.trim(), paymentMethod: input.paymentMethod,
+258 |     cashBoxId, bankAccountId, payableAccountId, costCenterId, projectId,
+259 |     paidAmount: normalizeAmount(input.paidAmount), allocations, notes: typeof input.notes === 'string' ? input.notes.trim() : '',
+260 |     totalAmount: normalizeAmount(input.totalAmount),
+261 |   };
+262 | }
+263 | 
+264 | function readExpense(database: DatabaseSync, id: number): Expense {
+265 |   const row = database.prepare(`SELECT expenses.*, COALESCE(boxes.name, banks.name, '') AS payout_name
+266 |     FROM expenses LEFT JOIN treasury_cash_boxes boxes ON boxes.id = expenses.cash_box_id
+267 |     LEFT JOIN treasury_bank_accounts banks ON banks.id = expenses.bank_account_id WHERE expenses.id = ?`).get(id) as Row | undefined;
+268 |   if (!row) throw new Error('المصروف المطلوب غير موجود.');
+269 |   const allocations = (database.prepare(`SELECT allocations.*, accounts.name AS account_name,
+270 |       centers.name AS center_name, projects.name AS project_name
+271 |     FROM expense_allocations allocations INNER JOIN accounts ON accounts.id = allocations.expense_account_id
+272 |     LEFT JOIN cost_centers centers ON centers.id = allocations.cost_center_id
+273 |     LEFT JOIN projects ON projects.id = allocations.project_id WHERE allocations.expense_id = ? ORDER BY allocations.id`).all(id) as Row[])
+274 |     .map((line) => ({
+275 |       id: Number(line.id), expenseAccountId: Number(line.expense_account_id), expenseAccountName: String(line.account_name),
+276 |       projectId: line.project_id === null ? null : Number(line.project_id), projectName: String(line.project_name ?? ''),
+277 |       costCenterId: line.cost_center_id === null ? null : Number(line.cost_center_id), costCenterName: String(line.center_name ?? ''),
+278 |       amount: String(line.amount), notes: String(line.notes),
+279 |     }));
+280 |   const total = parseAmount(String(row.total_amount));
+281 |   const paid = parseAmount(String(row.paid_amount));
+282 |   const remaining = total - paid;
+283 |   return {
+284 |     id, number: String(row.number), date: String(row.expense_date), operationType: String(row.operation_type), description: String(row.description),
+285 |     paymentMethod: String(row.payment_method) as Expense['paymentMethod'],
+286 |     cashBoxId: row.cash_box_id === null ? null : Number(row.cash_box_id), bankAccountId: row.bank_account_id === null ? null : Number(row.bank_account_id),
+287 |     payableAccountId: row.payable_account_id === null ? null : Number(row.payable_account_id),
+288 |     costCenterId: row.cost_center_id === null ? null : Number(row.cost_center_id), projectId: row.project_id === null ? null : Number(row.project_id),
+289 |     paidAmount: String(row.paid_amount), totalAmount: String(row.total_amount), allocations, notes: String(row.notes), currency: String(row.currency), total: formatAmount(total),
+290 |     remaining: formatAmount(remaining), settlementStatus: paid === 0n ? 'unpaid' : remaining === 0n ? 'paid' : 'partial',
+291 |     status: String(row.status) as Expense['status'], journalEntryId: row.journal_entry_id === null ? null : Number(row.journal_entry_id),
+292 |     createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+293 |   };
+294 | }
+295 | 
+296 | function createJournal(database: DatabaseSync, requestKey: string, date: string, description: string, lines: Array<{ accountId: number; debit: string; credit: string; description: string; costCenterId: number | null }>): number {
+297 |   const existing = database.prepare('SELECT id FROM journal_entries WHERE request_key = ?').get(requestKey) as Row | undefined;
+298 |   if (existing) return Number(existing.id);
+299 |   const debit = lines.reduce((sum, line) => sum + parseAmount(line.debit), 0n);
+300 |   const credit = lines.reduce((sum, line) => sum + parseAmount(line.credit), 0n);
+301 |   if (debit <= 0n || debit !== credit) throw new Error('الحركة المالية غير متوازنة ولا يمكن ترحيلها.');
+302 |   const journal = database.prepare(`INSERT INTO journal_entries (reference, entry_date, description, request_key) VALUES (?, ?, ?, ?)`)
+303 |     .run(requestKey, date, description, requestKey);
+304 |   const insert = database.prepare(`INSERT INTO journal_lines (entry_id, line_order, account_id, debit, credit, description, cost_center_id)
+305 |     VALUES (?, ?, ?, ?, ?, ?, ?)`);
+306 |   lines.forEach((line, index) => insert.run(Number(journal.lastInsertRowid), index + 1, line.accountId, line.debit, line.credit, line.description, line.costCenterId));
+307 |   return Number(journal.lastInsertRowid);
+308 | }
+309 | 
+310 | function mapVoucherRow(row: Row, partyKind: FinancialVoucherParty): FinancialVoucher {
+311 |   return {
+312 |     id: Number(row.id), number: String(row.number), partyKind, date: String(row.voucher_date),
+313 |     partyId: Number(partyKind === 'customer' ? row.customer_id : row.supplier_id), amount: String(row.amount),
+314 |     paymentMethod: String(row.payment_method) as FinancialVoucher['paymentMethod'],
+315 |     cashBoxId: row.cash_box_id === null ? null : Number(row.cash_box_id), bankAccountId: row.bank_account_id === null ? null : Number(row.bank_account_id),
+316 |     costCenterId: row.cost_center_id === null ? null : Number(row.cost_center_id), projectId: row.project_id === null ? null : Number(row.project_id),
+317 |     reference: String(row.reference), notes: String(row.notes), partyCode: String(row.party_code), partyName: String(row.party_name),
+318 |     partyAccountId: Number(row.party_account_id), payoutAccountName: String(row.payout_name),
+319 |     payoutCurrency: String(row.payout_currency),
+320 |     status: String(row.status) as FinancialVoucher['status'], journalEntryId: row.journal_entry_id === null ? null : Number(row.journal_entry_id),
+321 |     createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+322 |   };
+323 | }
+324 | 
+325 | function voucherList(database: DatabaseSync, partyKind: FinancialVoucherParty): string {
+326 |   const partyTable = partyKind === 'customer' ? 'customers' : 'suppliers';
+327 |   const partyForeignKey = partyKind === 'customer' ? 'customer_id' : 'supplier_id';
+328 |   return `SELECT vouchers.*, parties.code AS party_code, parties.name AS party_name,
+329 |       parties.account_id AS party_account_id, COALESCE(boxes.name, banks.name, '') AS payout_name,
+330 |       COALESCE(boxes.currency, banks.currency, 'EGP') AS payout_currency
+331 |     FROM financial_vouchers vouchers INNER JOIN ${partyTable} parties ON parties.id = vouchers.${partyForeignKey}
+332 |     LEFT JOIN treasury_cash_boxes boxes ON boxes.id = vouchers.cash_box_id
+333 |     LEFT JOIN treasury_bank_accounts banks ON banks.id = vouchers.bank_account_id WHERE vouchers.party_kind = '${partyKind}'`;
+334 | }
+335 | 
+336 | function updateVoucher(database: DatabaseSync, partyKind: FinancialVoucherParty, value: unknown): FinancialVoucher {
+337 |   const input = validateVoucher(database, partyKind, value);
+338 |   const voucherType = partyKind === 'customer' ? 'receipt' : 'payment';
+339 |   return transaction(database, () => {
+340 |     let id = input.id;
+341 |     if (id !== undefined) {
+342 |       const current = database.prepare('SELECT status, party_kind FROM financial_vouchers WHERE id = ?').get(id) as Row | undefined;
+343 |       if (!current || current.party_kind !== partyKind) throw new Error('السند المطلوب غير موجود في هذه الصفحة.');
+344 |       if (current.status !== 'draft') throw new Error('لا يمكن تعديل سند مرحّل.');
+345 |       const result = database.prepare(`UPDATE financial_vouchers SET ${partyKind === 'customer' ? 'customer_id' : 'supplier_id'} = ?,
+346 |         voucher_date = ?, amount = ?, payment_method = ?, cash_box_id = ?, bank_account_id = ?, cost_center_id = ?, project_id = ?, reference = ?, notes = ?, updated_at = datetime('now') WHERE id = ?`)
+347 |         .run(input.partyId, input.date, input.amount, input.paymentMethod, input.cashBoxId, input.bankAccountId, input.costCenterId, input.projectId, input.reference, input.notes, id);
+348 |       if (!result.changes) throw new Error('لم يُعثر على السند.');
+349 |     } else {
+350 |       const result = database.prepare(`INSERT INTO financial_vouchers (number, party_kind, voucher_type, voucher_date,
+351 |         customer_id, supplier_id, amount, payment_method, cash_box_id, bank_account_id, cost_center_id, project_id, reference, notes)
+352 |         VALUES ('PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+353 |         .run(partyKind, voucherType, input.date, partyKind === 'customer' ? input.partyId : null, partyKind === 'supplier' ? input.partyId : null,
+354 |           input.amount, input.paymentMethod, input.cashBoxId, input.bankAccountId, input.costCenterId, input.projectId, input.reference, input.notes);
+355 |       id = Number(result.lastInsertRowid);
+356 |       database.prepare('UPDATE financial_vouchers SET number = ? WHERE id = ?').run(`${partyKind === 'customer' ? 'CR' : 'SP'}-${String(id).padStart(7, '0')}`, id);
+357 |     }
+358 |     const row = database.prepare(`${voucherList(database, partyKind)} AND vouchers.id = ?`).get(id) as Row;
+359 |     return mapVoucherRow(row, partyKind);
+360 |   });
+361 | }
+362 | 
+363 | function approveVoucher(database: DatabaseSync, idValue: unknown, partyKind: FinancialVoucherParty): FinancialVoucher {
+364 |   const id = validId(idValue, 'رقم السند');
+365 |   return transaction(database, () => {
+366 |     const row = database.prepare('SELECT * FROM financial_vouchers WHERE id = ? AND party_kind = ?').get(id, partyKind) as Row | undefined;
+367 |     if (!row) throw new Error('السند المطلوب غير موجود.');
+368 |     if (row.status === 'posted') return mapVoucherRow(database.prepare(`${voucherList(database, partyKind)} AND vouchers.id = ?`).get(id) as Row, partyKind);
+369 |     const partyId = Number(partyKind === 'customer' ? row.customer_id : row.supplier_id);
+370 |     const party = database.prepare(`SELECT account_id FROM ${partyKind === 'customer' ? 'customers' : 'suppliers'} WHERE id = ? AND status = 'active'`).get(partyId) as Row | undefined;
+371 |     if (!party || party.account_id === null) throw new Error('الطرف غير نشط أو لا يملك حسابًا محاسبيًا.');
+372 |     const payoutAccount = validatePayout(database, String(row.payment_method) as 'cash' | 'bank', row.cash_box_id === null ? null : Number(row.cash_box_id), row.bank_account_id === null ? null : Number(row.bank_account_id));
+373 |     const amount = String(row.amount);
+374 |     const isCustomer = partyKind === 'customer';
+375 |     const journalEntryId = createJournal(database, `FIN-${partyKind === 'customer' ? 'CR' : 'SP'}-${id}`, String(row.voucher_date), `${isCustomer ? 'سند قبض عميل' : 'سند سداد مورد'} ${String(row.number)}`,
+376 |       isCustomer
+377 |         ? [
+378 |           { accountId: payoutAccount, debit: amount, credit: '0', description: 'تحصيل نقدي/بنكي', costCenterId: row.cost_center_id === null ? null : Number(row.cost_center_id) },
+379 |           { accountId: Number(party.account_id), debit: '0', credit: amount, description: 'حساب العميل', costCenterId: row.cost_center_id === null ? null : Number(row.cost_center_id) },
+380 |         ]
+381 |         : [
+382 |           { accountId: Number(party.account_id), debit: amount, credit: '0', description: 'حساب المورد', costCenterId: row.cost_center_id === null ? null : Number(row.cost_center_id) },
+383 |           { accountId: payoutAccount, debit: '0', credit: amount, description: 'سداد نقدي/بنكي', costCenterId: row.cost_center_id === null ? null : Number(row.cost_center_id) },
+384 |         ]);
+385 |     database.prepare(`UPDATE financial_vouchers SET status = 'posted', journal_entry_id = ?, updated_at = datetime('now') WHERE id = ? AND status = 'draft'`)
+386 |       .run(journalEntryId, id);
+387 |     return mapVoucherRow(database.prepare(`${voucherList(database, partyKind)} AND vouchers.id = ?`).get(id) as Row, partyKind);
+388 |   });
+389 | }
+390 | 
+391 | function writeExpense(database: DatabaseSync, value: unknown): Expense {
+392 |   const input = validateExpense(database, value);
+393 |   return transaction(database, () => {
+394 |     let id = input.id;
+395 |     if (id !== undefined) {
+396 |       const current = database.prepare('SELECT status FROM expenses WHERE id = ?').get(id) as Row | undefined;
+397 |       if (!current) throw new Error('المصروف المطلوب غير موجود.');
+398 |       if (current.status !== 'draft') throw new Error('لا يمكن تعديل مصروف مرحّل. أنشئ مصروفًا جديدًا لتسجيل التصحيح.');
+399 |       database.prepare(`UPDATE expenses SET expense_date = ?, operation_type = ?, description = ?, payment_method = ?,
+400 |         cash_box_id = ?, bank_account_id = ?, payable_account_id = ?, cost_center_id = ?, project_id = ?, paid_amount = ?, total_amount = ?, notes = ?, updated_at = datetime('now') WHERE id = ?`)
+401 |         .run(input.date, input.operationType, input.description, input.paymentMethod, input.cashBoxId, input.bankAccountId, input.payableAccountId,
+402 |           input.costCenterId, input.projectId, input.paidAmount, input.totalAmount, input.notes, id);
+403 |       database.prepare('DELETE FROM expense_allocations WHERE expense_id = ?').run(id);
+404 |     } else {
+405 |       const result = database.prepare(`INSERT INTO expenses (number, expense_date, operation_type, description, payment_method, cash_box_id,
+406 |         bank_account_id, payable_account_id, cost_center_id, project_id, paid_amount, total_amount, notes)
+407 |         VALUES ('PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+408 |         .run(input.date, input.operationType, input.description, input.paymentMethod, input.cashBoxId, input.bankAccountId, input.payableAccountId,
+409 |           input.costCenterId, input.projectId, input.paidAmount, input.totalAmount, input.notes);
+410 |       id = Number(result.lastInsertRowid);
+411 |       database.prepare('UPDATE expenses SET number = ? WHERE id = ?').run(`EXP-${String(id).padStart(7, '0')}`, id);
+412 |     }
+413 |     const insert = database.prepare(`INSERT INTO expense_allocations (expense_id, expense_account_id, project_id, cost_center_id, amount, notes)
+414 |       VALUES (?, ?, ?, ?, ?, ?)`);
+415 |     input.allocations.forEach((line) => insert.run(id, line.expenseAccountId, line.projectId, line.costCenterId, line.amount, line.notes));
+416 |     return readExpense(database, id);
+417 |   });
+418 | }
+419 | 
+420 | function approveExpense(database: DatabaseSync, idValue: unknown): Expense {
+421 |   const id = validId(idValue, 'رقم المصروف');
+422 |   return transaction(database, () => {
+423 |     const row = database.prepare('SELECT * FROM expenses WHERE id = ?').get(id) as Row | undefined;
+424 |     if (!row) throw new Error('المصروف المطلوب غير موجود.');
+425 |     if (row.status === 'posted') return readExpense(database, id);
+426 |     const allocations = database.prepare('SELECT * FROM expense_allocations WHERE expense_id = ? ORDER BY id').all(id) as Row[];
+427 |     if (allocations.length === 0) throw new Error('لا يمكن ترحيل مصروف بلا توزيعات.');
+428 |     const lines: Array<{ accountId: number; debit: string; credit: string; description: string; costCenterId: number | null }> = allocations.map((line) => ({
+429 |       accountId: Number(line.expense_account_id), debit: String(line.amount), credit: '0', description: String(row.description),
+430 |       costCenterId: line.cost_center_id === null ? null : Number(line.cost_center_id),
+431 |     }));
+432 |     const paid = parseAmount(String(row.paid_amount));
+433 |     if (paid > 0n) {
+434 |       const payoutAccount = validatePayout(database, String(row.payment_method) as 'cash' | 'bank', row.cash_box_id === null ? null : Number(row.cash_box_id), row.bank_account_id === null ? null : Number(row.bank_account_id));
+435 |       lines.push({ accountId: payoutAccount, debit: '0', credit: String(row.paid_amount), description: 'المبلغ المدفوع', costCenterId: row.cost_center_id === null ? null : Number(row.cost_center_id) });
+436 |     }
+437 |     const remaining = parseAmount(String(row.total_amount)) - paid;
+438 |     if (remaining > 0n) {
+439 |       const payable = validId(row.payable_account_id, 'حساب الالتزام');
+440 |       postableAccount(database, payable, 'liability', 'حساب الالتزام');
+441 |       lines.push({ accountId: payable, debit: '0', credit: formatAmount(remaining), description: 'المبلغ غير المدفوع', costCenterId: row.cost_center_id === null ? null : Number(row.cost_center_id) });
+442 |     }
+443 |     const journalEntryId = createJournal(database, `EXP-${id}`, String(row.expense_date), `${String(row.operation_type)}: ${String(row.description)}`, lines);
+444 |     database.prepare(`UPDATE expenses SET status = 'posted', journal_entry_id = ?, updated_at = datetime('now') WHERE id = ? AND status = 'draft'`)
+445 |       .run(journalEntryId, id);
+446 |     return readExpense(database, id);
+447 |   });
+448 | }
+449 | 
+450 | export function registerFinancialDocumentHandlers(requireAuthentication: () => DatabaseSync): void {
+451 |   ipcMain.handle('financial-vouchers:list', (_event, kindValue: unknown, searchValue: unknown) => {
+452 |     if (kindValue !== 'customer' && kindValue !== 'supplier') throw new Error('نوع سند الطرف غير صالح.');
+453 |     if (searchValue !== undefined && typeof searchValue !== 'string') throw new Error('عبارة البحث غير صالحة.');
+454 |     const database = requireAuthentication();
+455 |     const search = String(searchValue ?? '').trim();
+456 |     if (search.length > 180) throw new Error('عبارة البحث طويلة أكثر من اللازم.');
+457 |     const rows = database.prepare(`${voucherList(database, kindValue)} AND (? = '' OR number LIKE '%' || ? || '%'
+458 |       OR parties.name LIKE '%' || ? || '%' OR reference LIKE '%' || ? || '%' OR voucher_date LIKE '%' || ? || '%') ORDER BY voucher_date DESC, vouchers.id DESC`)
+459 |       .all(search, search, search, search, search) as Row[];
+460 |     return rows.map((row) => mapVoucherRow(row, kindValue));
+461 |   });
+462 |   ipcMain.handle('financial-vouchers:save', (_event, value: unknown) => {
+463 |     if (!value || typeof value !== 'object') throw new Error('بيانات السند غير صالحة.');
+464 |     const partyKind = (value as { partyKind?: unknown }).partyKind;
+465 |     if (partyKind !== 'customer' && partyKind !== 'supplier') throw new Error('نوع الطرف في السند غير صالح.');
+466 |     return updateVoucher(requireAuthentication(), partyKind, value);
+467 |   });
+468 |   ipcMain.handle('financial-vouchers:approve', (_event, value: unknown) => {
+469 |     if (!value || typeof value !== 'object') throw new Error('طلب اعتماد السند غير صالح.');
+470 |     const input = value as { id?: unknown; partyKind?: unknown };
+471 |     if (input.partyKind !== 'customer' && input.partyKind !== 'supplier') throw new Error('نوع الطرف في السند غير صالح.');
+472 |     return approveVoucher(requireAuthentication(), input.id, input.partyKind);
+473 |   });
+474 |   ipcMain.handle('financial-vouchers:delete', (_event, value: unknown) => {
+475 |     if (!value || typeof value !== 'object') throw new Error('طلب حذف السند غير صالح.');
+476 |     const input = value as { id?: unknown; partyKind?: unknown };
+477 |     if (input.partyKind !== 'customer' && input.partyKind !== 'supplier') throw new Error('نوع الطرف في السند غير صالح.');
+478 |     const database = requireAuthentication();
+479 |     const id = validId(input.id, 'رقم السند');
+480 |     const result = database.prepare(`DELETE FROM financial_vouchers WHERE id = ? AND party_kind = ? AND status = 'draft'`).run(id, input.partyKind);
+481 |     if (!result.changes) throw new Error('يمكن حذف المسودة فقط؛ السند المرحّل لا يُحذف.');
+482 |     return true;
+483 |   });
+484 |   ipcMain.handle('expenses:list', (_event, searchValue: unknown) => {
+485 |     if (searchValue !== undefined && typeof searchValue !== 'string') throw new Error('عبارة البحث غير صالحة.');
+486 |     const database = requireAuthentication();
+487 |     const search = String(searchValue ?? '').trim();
+488 |     if (search.length > 180) throw new Error('عبارة البحث طويلة أكثر من اللازم.');
+489 |     const rows = database.prepare(`SELECT id FROM expenses WHERE ? = '' OR number LIKE '%' || ? || '%'
+490 |       OR operation_type LIKE '%' || ? || '%' OR description LIKE '%' || ? || '%' OR notes LIKE '%' || ? || '%'
+491 |       ORDER BY expense_date DESC, id DESC`).all(search, search, search, search, search) as Row[];
+492 |     return rows.map((row) => readExpense(database, Number(row.id)));
+493 |   });
+494 |   ipcMain.handle('expenses:save', (_event, value: unknown) => writeExpense(requireAuthentication(), value));
+495 |   ipcMain.handle('expenses:approve', (_event, value: unknown) => approveExpense(requireAuthentication(), value));
+496 |   ipcMain.handle('expenses:delete', (_event, value: unknown) => {
+497 |     const database = requireAuthentication();
+498 |     const id = validId(value, 'رقم المصروف');
+499 |     const result = database.prepare(`DELETE FROM expenses WHERE id = ? AND status = 'draft'`).run(id);
+500 |     if (!result.changes) throw new Error('يمكن حذف المسودة فقط؛ المصروف المرحّل لا يُحذف.');
+501 |     return true;
+502 |   });
+503 | }
+504 | 

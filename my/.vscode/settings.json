@@ -1,0 +1,75 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "\u0003": true,
+        "/^node --version; git status --short; rg -n 'project-units\\|window\\.elsaad' src/main\\.ts src/types\\.d\\.ts electron/preload\\.ts$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^node --experimental-strip-types --input-type=module -e 'import \\{ calculateContractAmounts, generateInstallments, validateScheduleTotal \\} from \"\\./src/shared/property-sales\\.ts\"; const amounts = calculateContractAmounts\\(\\{ originalPrice: \"600000\", discount: \"0\", fees: \"0\", downPayment: \"100000\", brokerRate: \"0\", brokerOnOriginalPrice: false \\}\\); if \\(amounts\\.remaining !== \"500000\\.00\"\\) throw new Error\\(JSON\\.stringify\\(amounts\\)\\); const monthly = generateInstallments\\(\\{ frequency: \"monthly\", amount: \"100000\", count: 10, firstDueDate: \"2026-01-31\" \\}\\); if \\(monthly\\.length !== 10 ; monthly\\.reduce\\(\\(sum, item\\) => sum \\+ Number\\(item\\.amount\\), 0\\) !== 100000 ; monthly\\[1\\]\\.dueDate !== \"2026-02-28\"\\) throw new Error\\(\"monthly generation mismatch\"\\); const odd = generateInstallments\\(\\{ frequency: \"quarterly\", amount: \"100\\.00\", count: 3, firstDueDate: \"2026-01-31\" \\}\\); if \\(odd\\.map\\(item => item\\.amount\\)\\.join\\(\",\"\\) !== \"33\\.00,33\\.00,34\\.00\" ; odd\\[2\\]\\.dueDate !== \"2026-07-31\"\\) throw new Error\\(JSON\\.stringify\\(odd\\)\\); if \\(validateScheduleTotal\\(\"500000\", \\[\\.\\.\\.monthly\\]\\)\\.allocated !== \"100000\\.00\"\\) throw new Error\\(\"allocation mismatch\"\\); console\\.log\\(\"core schedule checks passed\"\\);'$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^node --experimental-strip-types --test tests/property-sales\\.test\\.ts$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "npm.cmd": true,
+        "/^node --experimental-strip-types -e 'import\\(\"\\./electron/property-sales\\.ts\"\\)\\.then\\(\\(module\\) => console\\.log\\(typeof module\\.installPropertySalesSchema\\)\\)'$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^node --experimental-strip-types --test tests/property-sales-db\\.test\\.ts$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "&": true,
+        "/^node tests/electron-ui-smoke\\.mjs \"\\$env:TEMP\\\\elsaad-property-sales-electron-e2e2\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^node --version$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^node tests/projects-ui-e2e\\.mjs \"\\$env:TEMP\\\\elsaad-projects-section-e2e-retry\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^node -e \"const \\{DatabaseSync\\}=require\\('node:sqlite'\\); const db=new DatabaseSync\\('C:/Users/Elhamd/AppData/Local/Temp/elsaad-projects-section-e2e-retry/elsaad-erp\\.sqlite'\\); console\\.log\\(db\\.prepare\\('select id, number, status, project_id, warehouse_id from inventory_issues'\\)\\.all\\(\\)\\); console\\.log\\(db\\.prepare\\('select id, project_id, code, name, status from project_work_items'\\)\\.all\\(\\)\\);\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^node --check tests/projects-ui-e2e\\.mjs$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^node tests/projects-ui-e2e\\.mjs \"\\$env:TEMP\\\\elsaad-projects-section-final\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^node -e \"const fs=require\\('node:fs'\\); const p='C:/Users/Elhamd/AppData/Local/Temp/elsaad-projects-section-final'; console\\.log\\(fs\\.existsSync\\(p\\+'/screenshots'\\) \\? fs\\.readdirSync\\(p\\+'/screenshots'\\) : 'no screenshots'\\); fetch\\('http://127\\.0\\.0\\.1:9222/json/list'\\)\\.then\\(r=>r\\.text\\(\\)\\)\\.then\\(console\\.log\\)\\.catch\\(e=>console\\.log\\(e\\.message\\)\\);\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^node tests/inspect-electron\\.mjs$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^node -e \"const \\{DatabaseSync\\}=require\\('node:sqlite'\\);const d=new DatabaseSync\\('C:/Users/Elhamd/AppData/Local/Temp/elsaad-projects-section-final/elsaad-erp\\.sqlite'\\);console\\.log\\(d\\.prepare\\('select quantity_delta,unit_cost from inventory_stock_movements where document_type=\\?'\\)\\.all\\('issue'\\)\\);console\\.log\\(d\\.prepare\\('select id,status from property_units'\\)\\.all\\(\\)\\);console\\.log\\(d\\.prepare\\('select \\* from property_contracts'\\)\\.all\\(\\)\\);\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^node tests/projects-ui-e2e\\.mjs \"\\$env:TEMP\\\\elsaad-projects-section-instrumented\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^node tests/projects-ui-e2e\\.mjs \"\\$env:TEMP\\\\elsaad-projects-section-finalrun\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^node -e \"const fs=require\\('node:fs'\\);const p='C:/Users/Elhamd/AppData/Local/Temp/elsaad-projects-section-complete-20261019';console\\.log\\(fs\\.existsSync\\(p\\+'/screenshots'\\)\\?fs\\.readdirSync\\(p\\+'/screenshots'\\):'no screenshots'\\);const \\{DatabaseSync\\}=require\\('node:sqlite'\\);const d=new DatabaseSync\\(p\\+'/elsaad-erp\\.sqlite'\\);console\\.log\\('projects',d\\.prepare\\('select code,name from projects'\\)\\.all\\(\\)\\);console\\.log\\('issues',d\\.prepare\\('select status from inventory_issues'\\)\\.all\\(\\)\\);\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

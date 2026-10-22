@@ -1,0 +1,23 @@
+241 |   if (typeof input.totalAmount !== 'string' || parseAmount(input.totalAmount) <= 0n) throw new Error('إجمالي المصروف يجب أن يكون أكبر من صفر.');
+242 |   const requestedTotal = parseAmount(input.totalAmount);
+243 |   if (total !== requestedTotal) throw new Error('مجموع توزيعات الأوامر يجب أن يساوي إجمالي المصروف بالضبط.');
+244 |   if (paid > total) throw new Error('المبلغ المدفوع لا يمكن أن يتجاوز إجمالي المصروف.');
+245 |   if (paid < total) {
+246 |     if (payableAccountId === null) throw new Error('اختر حساب الالتزام للمبلغ المتبقي غير المدفوع.');
+247 |     postableAccount(database, payableAccountId, 'liability', 'حساب الالتزام');
+248 |   }
+249 |   if (paid > 0n) {
+250 |     const payout = validatePayout(database, input.paymentMethod, cashBoxId, bankAccountId);
+251 |     postableAccount(database, payout, 'asset', 'حساب الخزينة أو البنك');
+252 |   }
+253 |   validateCenter(database, costCenterId);
+254 |   validateProject(database, projectId);
+255 |   return {
+256 |     ...(input.id === undefined ? {} : { id: Number(input.id) }), date: input.date,
+257 |     operationType: input.operationType.trim(), description: input.description.trim(), paymentMethod: input.paymentMethod,
+258 |     cashBoxId, bankAccountId, payableAccountId, costCenterId, projectId,
+259 |     paidAmount: normalizeAmount(input.paidAmount), allocations, notes: typeof input.notes === 'string' ? input.notes.trim() : '',
+260 |     totalAmount: normalizeAmount(input.totalAmount),
+261 |   };
+262 | }
+263 | 

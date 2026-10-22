@@ -1,0 +1,101 @@
+200 |     reference: String(row.reference), notes: String(row.notes), partyCode: String(row.party_code), partyName: String(row.party_name),
+201 |     partyAccountId: Number(row.party_account_id), payoutAccountName: String(row.payout_name), payoutCurrency: String(row.payout_currency),
+202 |     status: String(row.status) as FinancialVoucher['status'], journalEntryId: row.journal_entry_id === null ? null : Number(row.journal_entry_id),
+203 |     createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+204 |   };
+205 | }
+206 | 
+207 | function validateExpense(database: DatabaseSync, value: unknown): ExpenseInput & { totalAmount: string } {
+208 |   if (!value || typeof value !== 'object') throw new Error('بيانات المصروف غير صالحة.');
+209 |   const input = value as Partial<ExpenseInput> & { totalAmount?: unknown };
+210 |   if (input.id !== undefined) validId(input.id, 'رقم المصروف');
+211 |   if (!validDate(input.date)) throw new Error('تاريخ المصروف غير صالح.');
+212 |   if (typeof input.operationType !== 'string' || !input.operationType.trim() || input.operationType.length > 100) throw new Error('أدخل نوع العملية.');
+213 |   if (typeof input.description !== 'string' || !input.description.trim() || input.description.length > 300) throw new Error('أدخل اسم بند المصروف.');
+214 |   if (input.paymentMethod !== 'cash' && input.paymentMethod !== 'bank') throw new Error('طريقة الدفع غير صالحة.');
+215 |   const cashBoxId = input.cashBoxId === null ? null : validId(input.cashBoxId, 'الخزينة');
+216 |   const bankAccountId = input.bankAccountId === null ? null : validId(input.bankAccountId, 'البنك');
+217 |   const payableAccountId = input.payableAccountId === null ? null : validId(input.payableAccountId, 'حساب الالتزام');
+218 |   const costCenterId = input.costCenterId === null ? null : validId(input.costCenterId, 'مركز التكلفة');
+219 |   const projectId = input.projectId === null ? null : validId(input.projectId, 'المشروع');
+220 |   if (typeof input.paidAmount !== 'string' || typeof input.totalAmount !== 'string') throw new Error('مبالغ المصروف غير صالحة.');
+221 |   const paid = parseAmount(input.paidAmount);
+222 |   if (!Array.isArray(input.allocations) || input.allocations.length < 1 || input.allocations.length > 200) throw new Error('أضف توزيعًا واحدًا على الأقل للمصروف.');
+223 |   const allocations: ExpenseAllocationInput[] = [];
+224 |   let total = 0n;
+225 |   for (const valueLine of input.allocations) {
+226 |     if (!valueLine || typeof valueLine !== 'object') throw new Error('أحد توزيعات المصروف غير صالح.');
+227 |     const line = valueLine as Partial<ExpenseAllocationInput>;
+228 |     const expenseAccountId = validId(line.expenseAccountId, 'حساب المصروف');
+229 |     const account = postableAccount(database, expenseAccountId, 'expense', 'حساب المصروف');
+230 |     void account;
+231 |     const lineProject = line.projectId === null ? projectId : validId(line.projectId, 'مشروع التوزيع');
+232 |     const lineCenter = line.costCenterId === null ? costCenterId : validId(line.costCenterId, 'مركز توزيع');
+233 |     validateProject(database, lineProject);
+234 |     validateCenter(database, lineCenter);
+235 |     if (typeof line.amount !== 'string' || parseAmount(line.amount) <= 0n) throw new Error('مبلغ التوزيع يجب أن يكون أكبر من صفر.');
+236 |     if (typeof line.notes !== 'string' || line.notes.length > 500) throw new Error('ملاحظات التوزيع غير صالحة.');
+237 |     const amount = normalizeAmount(line.amount);
+238 |     total += parseAmount(amount);
+239 |     allocations.push({ expenseAccountId, projectId: lineProject, costCenterId: lineCenter, amount, notes: line.notes.trim() });
+240 |   }
+241 |   if (typeof input.totalAmount !== 'string' || parseAmount(input.totalAmount) <= 0n) throw new Error('إجمالي المصروف يجب أن يكون أكبر من صفر.');
+242 |   const requestedTotal = parseAmount(input.totalAmount);
+243 |   if (total !== requestedTotal) throw new Error('مجموع توزيعات الأوامر يجب أن يساوي إجمالي المصروف بالضبط.');
+244 |   if (paid > total) throw new Error('المبلغ المدفوع لا يمكن أن يتجاوز إجمالي المصروف.');
+245 |   if (paid < total) {
+246 |     if (payableAccountId === null) throw new Error('اختر حساب الالتزام للمبلغ المتبقي غير المدفوع.');
+247 |     postableAccount(database, payableAccountId, 'liability', 'حساب الالتزام');
+248 |   }
+249 |   if (paid > 0n) {
+250 |     const payout = validatePayout(database, input.paymentMethod, cashBoxId, bankAccountId);
+251 |     postableAccount(database, payout, 'asset', 'حساب الخزينة أو البنك');
+252 |   }
+253 |   validateCenter(database, costCenterId);
+254 |   validateProject(database, projectId);
+255 |   return {
+256 |     ...(input.id === undefined ? {} : { id: Number(input.id) }), date: input.date,
+257 |     operationType: input.operationType.trim(), description: input.description.trim(), paymentMethod: input.paymentMethod,
+258 |     cashBoxId, bankAccountId, payableAccountId, costCenterId, projectId,
+259 |     paidAmount: normalizeAmount(input.paidAmount), allocations, notes: typeof input.notes === 'string' ? input.notes.trim() : '',
+260 |     totalAmount: normalizeAmount(input.totalAmount),
+261 |   };
+262 | }
+263 | 
+264 | function readExpense(database: DatabaseSync, id: number): Expense {
+265 |   const row = database.prepare(`SELECT expenses.*, COALESCE(boxes.name, banks.name, '') AS payout_name
+266 |     FROM expenses LEFT JOIN treasury_cash_boxes boxes ON boxes.id = expenses.cash_box_id
+267 |     LEFT JOIN treasury_bank_accounts banks ON banks.id = expenses.bank_account_id WHERE expenses.id = ?`).get(id) as Row | undefined;
+268 |   if (!row) throw new Error('المصروف المطلوب غير موجود.');
+269 |   const allocations = (database.prepare(`SELECT allocations.*, accounts.name AS account_name,
+270 |       centers.name AS center_name, projects.name AS project_name
+271 |     FROM expense_allocations allocations INNER JOIN accounts ON accounts.id = allocations.expense_account_id
+272 |     LEFT JOIN cost_centers centers ON centers.id = allocations.cost_center_id
+273 |     LEFT JOIN projects ON projects.id = allocations.project_id WHERE allocations.expense_id = ? ORDER BY allocations.id`).all(id) as Row[])
+274 |     .map((line) => ({
+275 |       id: Number(line.id), expenseAccountId: Number(line.expense_account_id), expenseAccountName: String(line.account_name),
+276 |       projectId: line.project_id === null ? null : Number(line.project_id), projectName: String(line.project_name ?? ''),
+277 |       costCenterId: line.cost_center_id === null ? null : Number(line.cost_center_id), costCenterName: String(line.center_name ?? ''),
+278 |       amount: String(line.amount), notes: String(line.notes),
+279 |     }));
+280 |   const total = parseAmount(String(row.total_amount));
+281 |   const paid = parseAmount(String(row.paid_amount));
+282 |   const remaining = total - paid;
+283 |   return {
+284 |     id, number: String(row.number), date: String(row.expense_date), operationType: String(row.operation_type), description: String(row.description),
+285 |     paymentMethod: String(row.payment_method) as Expense['paymentMethod'],
+286 |     cashBoxId: row.cash_box_id === null ? null : Number(row.cash_box_id), bankAccountId: row.bank_account_id === null ? null : Number(row.bank_account_id),
+287 |     payableAccountId: row.payable_account_id === null ? null : Number(row.payable_account_id),
+288 |     costCenterId: row.cost_center_id === null ? null : Number(row.cost_center_id), projectId: row.project_id === null ? null : Number(row.project_id),
+289 |     paidAmount: String(row.paid_amount), totalAmount: String(row.total_amount), allocations, notes: String(row.notes), currency: String(row.currency), total: formatAmount(total),
+290 |     remaining: formatAmount(remaining), settlementStatus: paid === 0n ? 'unpaid' : remaining === 0n ? 'paid' : 'partial',
+291 |     status: String(row.status) as Expense['status'], journalEntryId: row.journal_entry_id === null ? null : Number(row.journal_entry_id),
+292 |     createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+293 |   };
+294 | }
+295 | 
+296 | function createJournal(database: DatabaseSync, requestKey: string, date: string, description: string, lines: Array<{ accountId: number; debit: string; credit: string; description: string; costCenterId: number | null }>): number {
+297 |   const existing = database.prepare('SELECT id FROM journal_entries WHERE request_key = ?').get(requestKey) as Row | undefined;
+298 |   if (existing) return Number(existing.id);
+299 |   const debit = lines.reduce((sum, line) => sum + parseAmount(line.debit), 0n);
+300 |   const credit = lines.reduce((sum, line) => sum + parseAmount(line.credit), 0n);

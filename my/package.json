@@ -1,0 +1,71 @@
+{
+  "name": "elsaad-erp",
+  "version": "1.0.0",
+  "description": "Elsaad ERP desktop application for property and business management.",
+  "author": "Mohanda Saad",
+  "copyright": "Copyright © 2026 Mohanda Saad",
+  "private": true,
+  "type": "module",
+  "main": "dist-electron/main.cjs",
+  "scripts": {
+    "dev": "npm run build:electron && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 concurrently --kill-others --names VITE,ELECTRON \"vite --host 127.0.0.1\" \"wait-on tcp:127.0.0.1:5173 && electron .\"",
+    "build:electron": "esbuild electron/main.ts electron/preload.ts --bundle --platform=node --format=cjs --external:electron --outdir=dist-electron --out-extension:.js=.cjs",
+    "build:ui": "vite build",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.electron.json",
+    "test": "node tests/run-property-sales-tests.mjs",
+    "test:reports-ui": "node tests/reports-ui-e2e.mjs",
+    "test:installment-reports-ui": "node tests/installment-reports-ui-e2e.mjs",
+    "build": "npm run typecheck && npm run build:electron && npm run build:ui",
+    "start": "electron .",
+    "test:assets-ui": "node tests/assets-ui-e2e.mjs",
+    "test:navigation-ui": "node tests/navigation-ui-e2e.mjs",
+    "dist:win": "node scripts/release-win.mjs"
+  },
+  "build": {
+    "appId": "com.elsaad.erp",
+    "productName": "Elsaad ERP",
+    "artifactName": "Elsaad-ERP-${version}-${arch}.${ext}",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**",
+      "dist-electron/**",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis",
+      "forceCodeSigning": true,
+      "icon": "build/icon.ico",
+      "legalTrademarks": "Elsaad ERP",
+      "signAndEditExecutable": true,
+      "signtoolOptions": {
+        "publisherName": "Mohanda Saad"
+      },
+      "artifactName": "Elsaad-ERP-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico",
+      "shortcutName": "Elsaad ERP",
+      "menuCategory": "Elsaad ERP",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron": "^44.9.0",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4",
+    "wait-on": "^8.0.4"
+  }
+}

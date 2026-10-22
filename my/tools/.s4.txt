@@ -1,0 +1,101 @@
+300 |   const credit = lines.reduce((sum, line) => sum + parseAmount(line.credit), 0n);
+301 |   if (debit <= 0n || debit !== credit) throw new Error('الحركة المالية غير متوازنة ولا يمكن ترحيلها.');
+302 |   const journal = database.prepare(`INSERT INTO journal_entries (reference, entry_date, description, request_key) VALUES (?, ?, ?, ?)`)
+303 |     .run(requestKey, date, description, requestKey);
+304 |   const insert = database.prepare(`INSERT INTO journal_lines (entry_id, line_order, account_id, debit, credit, description, cost_center_id)
+305 |     VALUES (?, ?, ?, ?, ?, ?, ?)`);
+306 |   lines.forEach((line, index) => insert.run(Number(journal.lastInsertRowid), index + 1, line.accountId, line.debit, line.credit, line.description, line.costCenterId));
+307 |   return Number(journal.lastInsertRowid);
+308 | }
+309 | 
+310 | function mapVoucherRow(row: Row, partyKind: FinancialVoucherParty): FinancialVoucher {
+311 |   return {
+312 |     id: Number(row.id), number: String(row.number), partyKind, date: String(row.voucher_date),
+313 |     partyId: Number(partyKind === 'customer' ? row.customer_id : row.supplier_id), amount: String(row.amount),
+314 |     paymentMethod: String(row.payment_method) as FinancialVoucher['paymentMethod'],
+315 |     cashBoxId: row.cash_box_id === null ? null : Number(row.cash_box_id), bankAccountId: row.bank_account_id === null ? null : Number(row.bank_account_id),
+316 |     costCenterId: row.cost_center_id === null ? null : Number(row.cost_center_id), projectId: row.project_id === null ? null : Number(row.project_id),
+317 |     reference: String(row.reference), notes: String(row.notes), partyCode: String(row.party_code), partyName: String(row.party_name),
+318 |     partyAccountId: Number(row.party_account_id), payoutAccountName: String(row.payout_name),
+319 |     payoutCurrency: String(row.payout_currency),
+320 |     status: String(row.status) as FinancialVoucher['status'], journalEntryId: row.journal_entry_id === null ? null : Number(row.journal_entry_id),
+321 |     createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+322 |   };
+323 | }
+324 | 
+325 | function voucherList(database: DatabaseSync, partyKind: FinancialVoucherParty): string {
+326 |   const partyTable = partyKind === 'customer' ? 'customers' : 'suppliers';
+327 |   const partyForeignKey = partyKind === 'customer' ? 'customer_id' : 'supplier_id';
+328 |   return `SELECT vouchers.*, parties.code AS party_code, parties.name AS party_name,
+329 |       parties.account_id AS party_account_id, COALESCE(boxes.name, banks.name, '') AS payout_name,
+330 |       COALESCE(boxes.currency, banks.currency, 'EGP') AS payout_currency
+331 |     FROM financial_vouchers vouchers INNER JOIN ${partyTable} parties ON parties.id = vouchers.${partyForeignKey}
+332 |     LEFT JOIN treasury_cash_boxes boxes ON boxes.id = vouchers.cash_box_id
+333 |     LEFT JOIN treasury_bank_accounts banks ON banks.id = vouchers.bank_account_id WHERE vouchers.party_kind = '${partyKind}'`;
+334 | }
+335 | 
+336 | function updateVoucher(database: DatabaseSync, partyKind: FinancialVoucherParty, value: unknown): FinancialVoucher {
+337 |   const input = validateVoucher(database, partyKind, value);
+338 |   const voucherType = partyKind === 'customer' ? 'receipt' : 'payment';
+339 |   return transaction(database, () => {
+340 |     let id = input.id;
+341 |     if (id !== undefined) {
+342 |       const current = database.prepare('SELECT status, party_kind FROM financial_vouchers WHERE id = ?').get(id) as Row | undefined;
+343 |       if (!current || current.party_kind !== partyKind) throw new Error('السند المطلوب غير موجود في هذه الصفحة.');
+344 |       if (current.status !== 'draft') throw new Error('لا يمكن تعديل سند مرحّل.');
+345 |       const result = database.prepare(`UPDATE financial_vouchers SET ${partyKind === 'customer' ? 'customer_id' : 'supplier_id'} = ?,
+346 |         voucher_date = ?, amount = ?, payment_method = ?, cash_box_id = ?, bank_account_id = ?, cost_center_id = ?, project_id = ?, reference = ?, notes = ?, updated_at = datetime('now') WHERE id = ?`)
+347 |         .run(input.partyId, input.date, input.amount, input.paymentMethod, input.cashBoxId, input.bankAccountId, input.costCenterId, input.projectId, input.reference, input.notes, id);
+348 |       if (!result.changes) throw new Error('لم يُعثر على السند.');
+349 |     } else {
+350 |       const result = database.prepare(`INSERT INTO financial_vouchers (number, party_kind, voucher_type, voucher_date,
+351 |         customer_id, supplier_id, amount, payment_method, cash_box_id, bank_account_id, cost_center_id, project_id, reference, notes)
+352 |         VALUES ('PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+353 |         .run(partyKind, voucherType, input.date, partyKind === 'customer' ? input.partyId : null, partyKind === 'supplier' ? input.partyId : null,
+354 |           input.amount, input.paymentMethod, input.cashBoxId, input.bankAccountId, input.costCenterId, input.projectId, input.reference, input.notes);
+355 |       id = Number(result.lastInsertRowid);
+356 |       database.prepare('UPDATE financial_vouchers SET number = ? WHERE id = ?').run(`${partyKind === 'customer' ? 'CR' : 'SP'}-${String(id).padStart(7, '0')}`, id);
+357 |     }
+358 |     const row = database.prepare(`${voucherList(database, partyKind)} AND vouchers.id = ?`).get(id) as Row;
+359 |     return mapVoucherRow(row, partyKind);
+360 |   });
+361 | }
+362 | 
+363 | function approveVoucher(database: DatabaseSync, idValue: unknown, partyKind: FinancialVoucherParty): FinancialVoucher {
+364 |   const id = validId(idValue, 'رقم السند');
+365 |   return transaction(database, () => {
+366 |     const row = database.prepare('SELECT * FROM financial_vouchers WHERE id = ? AND party_kind = ?').get(id, partyKind) as Row | undefined;
+367 |     if (!row) throw new Error('السند المطلوب غير موجود.');
+368 |     if (row.status === 'posted') return mapVoucherRow(database.prepare(`${voucherList(database, partyKind)} AND vouchers.id = ?`).get(id) as Row, partyKind);
+369 |     const partyId = Number(partyKind === 'customer' ? row.customer_id : row.supplier_id);
+370 |     const party = database.prepare(`SELECT account_id FROM ${partyKind === 'customer' ? 'customers' : 'suppliers'} WHERE id = ? AND status = 'active'`).get(partyId) as Row | undefined;
+371 |     if (!party || party.account_id === null) throw new Error('الطرف غير نشط أو لا يملك حسابًا محاسبيًا.');
+372 |     const payoutAccount = validatePayout(database, String(row.payment_method) as 'cash' | 'bank', row.cash_box_id === null ? null : Number(row.cash_box_id), row.bank_account_id === null ? null : Number(row.bank_account_id));
+373 |     const amount = String(row.amount);
+374 |     const isCustomer = partyKind === 'customer';
+375 |     const journalEntryId = createJournal(database, `FIN-${partyKind === 'customer' ? 'CR' : 'SP'}-${id}`, String(row.voucher_date), `${isCustomer ? 'سند قبض عميل' : 'سند سداد مورد'} ${String(row.number)}`,
+376 |       isCustomer
+377 |         ? [
+378 |           { accountId: payoutAccount, debit: amount, credit: '0', description: 'تحصيل نقدي/بنكي', costCenterId: row.cost_center_id === null ? null : Number(row.cost_center_id) },
+379 |           { accountId: Number(party.account_id), debit: '0', credit: amount, description: 'حساب العميل', costCenterId: row.cost_center_id === null ? null : Number(row.cost_center_id) },
+380 |         ]
+381 |         : [
+382 |           { accountId: Number(party.account_id), debit: amount, credit: '0', description: 'حساب المورد', costCenterId: row.cost_center_id === null ? null : Number(row.cost_center_id) },
+383 |           { accountId: payoutAccount, debit: '0', credit: amount, description: 'سداد نقدي/بنكي', costCenterId: row.cost_center_id === null ? null : Number(row.cost_center_id) },
+384 |         ]);
+385 |     database.prepare(`UPDATE financial_vouchers SET status = 'posted', journal_entry_id = ?, updated_at = datetime('now') WHERE id = ? AND status = 'draft'`)
+386 |       .run(journalEntryId, id);
+387 |     return mapVoucherRow(database.prepare(`${voucherList(database, partyKind)} AND vouchers.id = ?`).get(id) as Row, partyKind);
+388 |   });
+389 | }
+390 | 
+391 | function writeExpense(database: DatabaseSync, value: unknown): Expense {
+392 |   const input = validateExpense(database, value);
+393 |   return transaction(database, () => {
+394 |     let id = input.id;
+395 |     if (id !== undefined) {
+396 |       const current = database.prepare('SELECT status FROM expenses WHERE id = ?').get(id) as Row | undefined;
+397 |       if (!current) throw new Error('المصروف المطلوب غير موجود.');
+398 |       if (current.status !== 'draft') throw new Error('لا يمكن تعديل مصروف مرحّل. أنشئ مصروفًا جديدًا لتسجيل التصحيح.');
+399 |       database.prepare(`UPDATE expenses SET expense_date = ?, operation_type = ?, description = ?, payment_method = ?,
+400 |         cash_box_id = ?, bank_account_id = ?, payable_account_id = ?, cost_center_id = ?, project_id = ?, paid_amount = ?, total_amount = ?, notes = ?, updated_at = datetime('now') WHERE id = ?`)

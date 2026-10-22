@@ -1,0 +1,32 @@
+125 |       status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'posted')),
+126 |       journal_entry_id INTEGER UNIQUE REFERENCES journal_entries(id) ON DELETE RESTRICT,
+127 |       created_at TEXT NOT NULL DEFAULT (datetime('now')),
+128 |       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+129 |       CHECK ((payment_method = 'cash' AND (bank_account_id IS NULL)) OR (payment_method = 'bank' AND (cash_box_id IS NULL)))
+130 |     );
+131 |     CREATE INDEX IF NOT EXISTS expenses_date_status ON expenses(expense_date DESC, status, id DESC);
+132 |     CREATE TABLE IF NOT EXISTS expense_allocations (
+133 |       id INTEGER PRIMARY KEY AUTOINCREMENT,
+134 |       expense_id INTEGER NOT NULL REFERENCES expenses(id) ON DELETE CASCADE,
+135 |       expense_account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+136 |       project_id INTEGER REFERENCES projects(id) ON DELETE RESTRICT,
+137 |       cost_center_id INTEGER REFERENCES cost_centers(id) ON DELETE RESTRICT,
+138 |       amount TEXT NOT NULL,
+139 |       notes TEXT NOT NULL DEFAULT ''
+140 |     );
+141 |     CREATE INDEX IF NOT EXISTS expense_allocations_expense ON expense_allocations(expense_id, id);
+142 |   `);
+143 | }
+144 | 
+145 | function validateVoucher(database: DatabaseSync, partyKind: FinancialVoucherParty, value: unknown): FinancialVoucherInput {
+146 |   if (!value || typeof value !== 'object') throw new Error('بيانات السند غير صالحة.');
+147 |   const input = value as Partial<FinancialVoucherInput>;
+148 |   if (input.id !== undefined) validId(input.id, 'رقم السند');
+149 |   if (input.partyKind !== partyKind) throw new Error('نوع الطرف في السند غير صالح.');
+150 |   if (!validDate(input.date)) throw new Error('تاريخ السند غير صالح.');
+151 |   const partyId = validId(input.partyId, partyKind === 'customer' ? 'العميل' : 'المورد');
+152 |   if (typeof input.amount !== 'string' || parseAmount(input.amount) <= 0n) throw new Error('مبلغ السند يجب أن يكون أكبر من صفر.');
+153 |   if (input.paymentMethod !== 'cash' && input.paymentMethod !== 'bank') throw new Error('طريقة الدفع غير صالحة.');
+154 |   const cashBoxId = input.cashBoxId === null ? null : validId(input.cashBoxId, 'الخزينة');
+155 |   const bankAccountId = input.bankAccountId === null ? null : validId(input.bankAccountId, 'البنك');
+156 |   const costCenterId = input.costCenterId === null ? null : validId(input.costCenterId, 'مركز التكلفة');

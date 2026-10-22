@@ -1,0 +1,56 @@
+400 |         cash_box_id = ?, bank_account_id = ?, payable_account_id = ?, cost_center_id = ?, project_id = ?, paid_amount = ?, total_amount = ?, notes = ?, updated_at = datetime('now') WHERE id = ?`)
+401 |         .run(input.date, input.operationType, input.description, input.paymentMethod, input.cashBoxId, input.bankAccountId, input.payableAccountId,
+402 |           input.costCenterId, input.projectId, input.paidAmount, input.totalAmount, input.notes, id);
+403 |       database.prepare('DELETE FROM expense_allocations WHERE expense_id = ?').run(id);
+404 |     } else {
+405 |       const result = database.prepare(`INSERT INTO expenses (number, expense_date, operation_type, description, payment_method, cash_box_id,
+406 |         bank_account_id, payable_account_id, cost_center_id, project_id, paid_amount, total_amount, notes)
+407 |         VALUES ('PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+408 |         .run(input.date, input.operationType, input.description, input.paymentMethod, input.cashBoxId, input.bankAccountId, input.payableAccountId,
+409 |           input.costCenterId, input.projectId, input.paidAmount, input.totalAmount, input.notes);
+410 |       id = Number(result.lastInsertRowid);
+411 |       database.prepare('UPDATE expenses SET number = ? WHERE id = ?').run(`EXP-${String(id).padStart(7, '0')}`, id);
+412 |     }
+413 |     const insert = database.prepare(`INSERT INTO expense_allocations (expense_id, expense_account_id, project_id, cost_center_id, amount, notes)
+414 |       VALUES (?, ?, ?, ?, ?, ?)`);
+415 |     input.allocations.forEach((line) => insert.run(id, line.expenseAccountId, line.projectId, line.costCenterId, line.amount, line.notes));
+416 |     return readExpense(database, id);
+417 |   });
+418 | }
+419 | 
+420 | function approveExpense(database: DatabaseSync, idValue: unknown): Expense {
+421 |   const id = validId(idValue, 'رقم المصروف');
+422 |   return transaction(database, () => {
+423 |     const row = database.prepare('SELECT * FROM expenses WHERE id = ?').get(id) as Row | undefined;
+424 |     if (!row) throw new Error('المصروف المطلوب غير موجود.');
+425 |     if (row.status === 'posted') return readExpense(database, id);
+426 |     const allocations = database.prepare('SELECT * FROM expense_allocations WHERE expense_id = ? ORDER BY id').all(id) as Row[];
+427 |     if (allocations.length === 0) throw new Error('لا يمكن ترحيل مصروف بلا توزيعات.');
+428 |     const lines: Array<{ accountId: number; debit: string; credit: string; description: string; costCenterId: number | null }> = allocations.map((line) => ({
+429 |       accountId: Number(line.expense_account_id), debit: String(line.amount), credit: '0', description: String(row.description),
+430 |       costCenterId: line.cost_center_id === null ? null : Number(line.cost_center_id),
+431 |     }));
+432 |     const paid = parseAmount(String(row.paid_amount));
+433 |     if (paid > 0n) {
+434 |       const payoutAccount = validatePayout(database, String(row.payment_method) as 'cash' | 'bank', row.cash_box_id === null ? null : Number(row.cash_box_id), row.bank_account_id === null ? null : Number(row.bank_account_id));
+435 |       lines.push({ accountId: payoutAccount, debit: '0', credit: String(row.paid_amount), description: 'المبلغ المدفوع', costCenterId: row.cost_center_id === null ? null : Number(row.cost_center_id) });
+436 |     }
+437 |     const remaining = parseAmount(String(row.total_amount)) - paid;
+438 |     if (remaining > 0n) {
+439 |       const payable = validId(row.payable_account_id, 'حساب الالتزام');
+440 |       postableAccount(database, payable, 'liability', 'حساب الالتزام');
+441 |       lines.push({ accountId: payable, debit: '0', credit: formatAmount(remaining), description: 'المبلغ غير المدفوع', costCenterId: row.cost_center_id === null ? null : Number(row.cost_center_id) });
+442 |     }
+443 |     const journalEntryId = createJournal(database, `EXP-${id}`, String(row.expense_date), `${String(row.operation_type)}: ${String(row.description)}`, lines);
+444 |     database.prepare(`UPDATE expenses SET status = 'posted', journal_entry_id = ?, updated_at = datetime('now') WHERE id = ? AND status = 'draft'`)
+445 |       .run(journalEntryId, id);
+446 |     return readExpense(database, id);
+447 |   });
+448 | }
+449 | 
+450 | export function registerFinancialDocumentHandlers(requireAuthentication: () => DatabaseSync): void {
+451 |   ipcMain.handle('financial-vouchers:list', (_event, kindValue: unknown, searchValue: unknown) => {
+452 |     if (kindValue !== 'customer' && kindValue !== 'supplier') throw new Error('نوع سند الطرف غير صالح.');
+453 |     if (searchValue !== undefined && typeof searchValue !== 'string') throw new Error('عبارة البحث غير صالحة.');
+454 |     const database = requireAuthentication();
+455 |     const search = String(searchValue ?? '').trim();

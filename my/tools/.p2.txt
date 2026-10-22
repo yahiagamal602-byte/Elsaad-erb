@@ -1,0 +1,76 @@
+55 |     <td class="sales-row-actions">${voucher.status === 'draft' ? `<button class="icon-button" type="button" data-action="financial-voucher-edit" data-id="${voucher.id}">تعديل</button>
+56 |       <button class="icon-button" type="button" data-action="financial-voucher-approve" data-id="${voucher.id}" data-kind="${partyKind}">اعتماد وترحيل</button>
+57 |       <button class="icon-button icon-button--danger" type="button" data-action="financial-voucher-delete" data-id="${voucher.id}" data-kind="${partyKind}">حذف</button>`
+58 |       : `<button class="icon-button" type="button" data-action="financial-voucher-open" data-id="${voucher.id}">عرض القيد</button>`}</td></tr>`).join('');
+59 |   return `<section class="section-heading section-heading--page"><div><p class="eyebrow">المالية · ${partyLabel}</p><h1>سندات ${partyLabel}</h1><p class="muted">${partyKind === 'customer' ? 'قبض العميل يزيد الخزينة أو البنك ويخفض ذمم العميل.' : 'سداد المورد يخفض الخزينة أو البنك وذمم المورد.'}</p></div>
+60 |     <div class="toolbar-actions"><button class="button button--primary" type="button" data-action="financial-voucher-new">＋ جديد</button><button class="button button--secondary" type="button" data-action="financial-voucher-refresh">تحديث</button><button class="button button--quiet" type="button" data-action="financial-document-exit">خروج</button></div></section>
+61 |     <section class="accounting-summary"><article class="accounting-summary__card"><span>إجمالي ${actionLabel} المرحّل</span><strong>${money(formatAmount(postedTotal))} ج.م</strong></article><article class="accounting-summary__card"><span>عدد السندات المرحلة</span><strong>${posted.length}</strong></article><article class="accounting-summary__card"><span>مسودات</span><strong>${vouchers.length - posted.length}</strong></article></section>
+62 |     <section class="table-panel financial-document-panel"><div class="table-toolbar"><form class="accounting-search" data-form="financial-voucher-search"><label class="search-field"><span>⌕</span><input name="search" type="search" maxlength="180" value="${escapeHtml(search)}" placeholder="بحث برقم السند أو الطرف أو المرجع"></label><button class="button button--secondary" type="submit">بحث</button></form><span class="muted">${vouchers.length} سند</span></div>
+63 |       <div class="table-scroll"><table class="financial-document-table"><thead><tr><th>رقم السند</th><th>التاريخ</th><th>${partyKind === 'customer' ? 'العميل' : 'المورد'}</th><th>طريقة الدفع / الحساب</th><th>المرجع</th><th>المبلغ</th><th>الحالة</th><th>الإجراءات</th></tr></thead><tbody>${rows || '<tr><td colspan="8" class="empty-state">لا توجد سندات مطابقة.</td></tr>'}</tbody></table></div></section>
+64 |     <div id="financial-voucher-editor-host"></div><div id="financial-voucher-detail-host"></div>`;
+65 | }
+66 | 
+67 | export function renderFinancialVoucherEditor(
+68 |   partyKind: FinancialVoucherParty, voucher: FinancialVoucher | null, parties: Party[], boxes: CashBox[], banks: BankAccount[],
+69 |   centers: CostCenter[], projects: Project[],
+70 | ): string {
+71 |   const partyLabel = partyKind === 'customer' ? 'العميل' : 'المورد';
+72 |   const partyOptions = parties.filter((party) => party.status === 'active' || party.id === voucher?.partyId)
+73 |     .map((party) => `<option value="${party.id}" ${party.id === voucher?.partyId ? 'selected' : ''}>${escapeHtml(`${party.code} — ${party.name}${party.accountId ? ` · ${party.accountCode} ${party.accountName}` : ' · الحساب غير مربوط'}`)}</option>`).join('');
+74 |   const centerOptions = centers.filter((center) => center.postable).map((center) => `<option value="${center.id}" ${center.id === voucher?.costCenterId ? 'selected' : ''}>${escapeHtml(`${center.code} — ${center.name}`)}</option>`).join('');
+75 |   const projectOptions = projects.filter((project) => project.status !== 'cancelled').map((project) => `<option value="${project.id}" ${project.id === voucher?.projectId ? 'selected' : ''}>${escapeHtml(`${project.code} — ${project.name}`)}</option>`).join('');
+76 |   const locked = voucher?.status === 'posted';
+77 |   const method = voucher?.paymentMethod ?? 'cash';
+78 |   return `<div class="modal-backdrop" id="financial-voucher-modal"><section class="record-modal record-modal--wide" role="dialog" aria-modal="true" aria-labelledby="financial-voucher-title">
+79 |     <header class="modal-heading"><div><p class="eyebrow">${partyKind === 'customer' ? 'قبض عميل' : 'سداد مورد'}</p><h2 id="financial-voucher-title">${voucher ? `سند ${escapeHtml(voucher.number)} · ${locked ? 'مرحّل' : 'تعديل مسودة'}` : 'سند جديد'}</h2></div><button class="icon-button" type="button" data-action="financial-voucher-cancel">إغلاق</button></header>
+80 |     <form class="record-form financial-document-form" data-form="financial-voucher" data-kind="${partyKind}"><input name="id" type="hidden" value="${voucher?.id ?? ''}"><input name="partyKind" type="hidden" value="${partyKind}">
+81 |       <label class="field"><span>نوع السند</span><input value="${partyKind === 'customer' ? 'سند قبض عميل' : 'سند سداد مورد'}" disabled></label><label class="field"><span>رقم السند</span><input value="${escapeHtml(voucher?.number ?? 'يُولّد عند الحفظ')}" disabled></label>
+82 |       <label class="field"><span>التاريخ *</span><input name="date" type="date" required value="${escapeHtml(voucher?.date ?? '')}" ${locked ? 'disabled' : ''}></label>
+83 |       <label class="field"><span>${partyLabel} *</span><select name="partyId" required ${locked ? 'disabled' : ''}><option value="">اختر ${partyLabel}</option>${partyOptions}</select></label>
+84 |       <label class="field"><span>المبلغ *</span><input name="amount" type="number" min="0.01" step="0.01" required value="${escapeHtml(voucher?.amount ?? '')}" ${locked ? 'disabled' : ''}></label>
+85 |       ${paymentMethodOptions(method, locked)}${payoutFields(boxes, banks, method, voucher?.cashBoxId ?? null, voucher?.bankAccountId ?? null, locked)}
+86 |       <label class="field"><span>مركز التكلفة</span><select name="costCenterId" ${locked ? 'disabled' : ''}><option value="">دون مركز</option>${centerOptions}</select></label>
+87 |       <label class="field"><span>المشروع</span><select name="projectId" ${locked ? 'disabled' : ''}><option value="">دون مشروع</option>${projectOptions}</select></label>
+88 |       <label class="field"><span>رقم المرجع</span><input name="reference" maxlength="100" value="${escapeHtml(voucher?.reference ?? '')}" ${locked ? 'disabled' : ''}></label>
+89 |       <label class="field field--wide"><span>ملاحظات</span><textarea name="notes" rows="2" maxlength="2000" ${locked ? 'disabled' : ''}>${escapeHtml(voucher?.notes ?? '')}</textarea></label>
+90 |       <p class="form-error field--wide" id="financial-voucher-error" role="alert" hidden></p><div class="form-actions field--wide">${locked ? '<button class="button button--secondary" type="button" data-action="financial-voucher-cancel">إغلاق</button>' : '<button class="button button--secondary" type="button" data-action="financial-voucher-cancel">إلغاء</button><button class="button button--primary" type="submit">حفظ مسودة</button>'}</div>
+91 |     </form></section></div>`;
+92 | }
+93 | 
+94 | export function renderExpenseAllocationRow(accounts: AccountItem[], centers: CostCenter[], projects: Project[], allocation?: Expense['allocations'][number]): string {
+95 |   const accountOptions = leafAccounts(accounts, 'expense').map((account) => `<option value="${account.id}" ${allocation?.expenseAccountId === account.id ? 'selected' : ''}>${escapeHtml(`${account.code} — ${account.name}`)}</option>`).join('');
+96 |   const centerOptions = centers.filter((item) => item.postable).map((center) => `<option value="${center.id}" ${allocation?.costCenterId === center.id ? 'selected' : ''}>${escapeHtml(`${center.code} — ${center.name}`)}</option>`).join('');
+97 |   const projectOptions = projects.filter((item) => item.status !== 'cancelled').map((project) => `<option value="${project.id}" ${allocation?.projectId === project.id ? 'selected' : ''}>${escapeHtml(`${project.code} — ${project.name}`)}</option>`).join('');
+98 |   return `<tr data-expense-allocation><td><select name="expenseAccountId" required><option value="">اختر حساب مصروف</option>${accountOptions}</select></td><td><select name="projectId"><option value="">دون مشروع</option>${projectOptions}</select></td>
+99 |     <td><select name="costCenterId"><option value="">دون مركز</option>${centerOptions}</select></td><td><input name="amount" type="number" min="0.01" step="0.01" required value="${escapeHtml(allocation?.amount ?? '')}"></td>
+100 |     <td><input name="notes" maxlength="500" value="${escapeHtml(allocation?.notes ?? '')}"></td><td><button class="button button--tiny button--danger" type="button" data-action="expense-allocation-remove">حذف</button></td></tr>`;
+101 | }
+102 | 
+103 | export function renderExpenseEditor(expense: Expense | null, accounts: AccountItem[], boxes: CashBox[], banks: BankAccount[], centers: CostCenter[], projects: Project[], duplicate = false): string {
+104 |   const locked = expense?.status === 'posted';
+105 |   const method = expense?.paymentMethod ?? 'cash';
+106 |   const payableOptions = leafAccounts(accounts, 'liability').map((account) => `<option value="${account.id}" ${expense?.payableAccountId === account.id ? 'selected' : ''}>${escapeHtml(`${account.code} — ${account.name}`)}</option>`).join('');
+107 |   const centerOptions = centers.filter((item) => item.postable).map((center) => `<option value="${center.id}" ${expense?.costCenterId === center.id ? 'selected' : ''}>${escapeHtml(`${center.code} — ${center.name}`)}</option>`).join('');
+108 |   const projectOptions = projects.filter((item) => item.status !== 'cancelled').map((project) => `<option value="${project.id}" ${expense?.projectId === project.id ? 'selected' : ''}>${escapeHtml(`${project.code} — ${project.name}`)}</option>`).join('');
+109 |   const allocationRows = expense?.allocations.map((line) => renderExpenseAllocationRow(accounts, centers, projects, line)).join('') ?? renderExpenseAllocationRow(accounts, centers, projects);
+110 |   return `<div class="modal-backdrop" id="expense-modal"><section class="record-modal record-modal--wide expense-modal" role="dialog" aria-modal="true" aria-labelledby="expense-title">
+111 |     <header class="modal-heading"><div><p class="eyebrow">إدارة المصروفات · ${expense && !duplicate ? escapeHtml(expense.number) : 'مسودة جديدة'}</p><h2 id="expense-title">${locked ? `مصروف مرحّل ${escapeHtml(expense.number)}` : duplicate ? 'نسخة مصروف جديدة' : expense ? 'تعديل مسودة المصروف' : 'مصروف جديد'}</h2></div><button class="icon-button" type="button" data-action="expense-cancel">إغلاق</button></header>
+112 |     <form class="expense-form" data-form="expense"><input name="id" type="hidden" value="${duplicate ? '' : expense?.id ?? ''}"><div class="expense-meta">
+113 |       <label class="field"><span>المسلسل</span><input value="${escapeHtml(duplicate ? 'يُولّد مسلسل جديد' : expense?.number ?? 'يُولّد عند الحفظ')}" disabled></label><label class="field"><span>التاريخ *</span><input name="date" type="date" required value="${escapeHtml(duplicate ? '' : expense?.date ?? '')}" ${locked ? 'disabled' : ''}></label>
+114 |       <label class="field"><span>نوع العملية *</span><input name="operationType" maxlength="100" required value="${escapeHtml(expense?.operationType ?? '')}" ${locked ? 'disabled' : ''}></label><label class="field"><span>اسم البند *</span><input name="description" maxlength="300" required value="${escapeHtml(expense?.description ?? '')}" ${locked ? 'disabled' : ''}></label>
+115 |       <label class="field"><span>العملة</span><input value="جنيه مصري (EGP)" disabled></label><label class="field"><span>الإجمالي *</span><input name="totalAmount" type="number" min="0.01" step="0.01" required value="${escapeHtml(expense?.totalAmount ?? '')}" ${locked ? 'disabled' : ''}></label>
+116 |       <label class="field"><span>المبلغ المدفوع *</span><input name="paidAmount" type="number" min="0" step="0.01" required value="${escapeHtml(duplicate ? '0' : expense?.paidAmount ?? '0')}" ${locked ? 'disabled' : ''}></label>
+117 |       <label class="field"><span>المتبقي</span><input data-expense-remaining value="${escapeHtml(expense?.remaining ?? '')}" disabled></label>${paymentMethodOptions(method, locked)}
+118 |       ${payoutFields(boxes, banks, method, duplicate ? null : expense?.cashBoxId ?? null, duplicate ? null : expense?.bankAccountId ?? null, locked)}
+119 |       <label class="field"><span>حساب الالتزام للمبلغ المتبقي</span><select name="payableAccountId" ${locked ? 'disabled' : ''}><option value="">اختر عند وجود متبقي</option>${payableOptions}</select></label>
+120 |       <label class="field"><span>مركز التكلفة العام</span><select name="costCenterId" ${locked ? 'disabled' : ''}><option value="">دون مركز</option>${centerOptions}</select></label><label class="field"><span>المشروع العام</span><select name="projectId" ${locked ? 'disabled' : ''}><option value="">دون مشروع</option>${projectOptions}</select></label>
+121 |       <label class="field field--wide"><span>ملاحظات</span><textarea name="notes" maxlength="2000" rows="2" ${locked ? 'disabled' : ''}>${escapeHtml(expense?.notes ?? '')}</textarea></label></div>
+122 |       <div class="expense-allocation-heading"><div><strong>توزيع الأوامر والمشروعات</strong><small>يجب أن يساوي مجموع التوزيع إجمالي المصروف.</small></div>${locked ? '' : '<button class="button button--secondary" type="button" data-action="expense-allocation-add">＋ إضافة توزيع</button>'}</div>
+123 |       <div class="table-scroll"><table class="expense-allocation-table"><thead><tr><th>حساب المصروف *</th><th>المشروع</th><th>مركز التكلفة</th><th>المبلغ *</th><th>ملاحظات</th><th></th></tr></thead><tbody id="expense-allocations">${allocationRows}</tbody></table></div>
+124 |       <div class="expense-total-strip"><span>مجموع التوزيع <strong data-expense-allocated>0</strong> ج.م</span><span>المتبقي <strong data-expense-remaining-label>${money(duplicate ? expense?.totalAmount ?? '0' : expense?.remaining ?? expense?.totalAmount ?? '0')}</strong> ج.م</span></div>
+125 |       ${locked ? '<p class="journal-help">المصروف مرحّل ولا يمكن تعديله أو حذفه.</p>' : ''}<p class="form-error" id="expense-error" role="alert" hidden></p>
+126 |       <div class="form-actions">${locked ? '<button class="button button--secondary" type="button" data-action="expense-cancel">إغلاق</button>' : `<button class="button button--secondary" type="button" data-action="expense-cancel">إلغاء</button>${expense && !duplicate ? `<button class="button button--secondary" type="button" data-action="expense-duplicate" data-id="${expense.id}">تكرار المصروف</button>` : ''}<button class="button button--primary" type="submit">حفظ مسودة</button>`}</div>
+127 |     </form></section></div>`;
+128 | }
+129 | 
+130 | export function renderExpensesPage(expenses: Expense[], search = ''): string {

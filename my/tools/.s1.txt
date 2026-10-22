@@ -1,0 +1,128 @@
+73 |   }
+74 |   if (bankAccountId === null || cashBoxId !== null) throw new Error('اختر بنكًا نشطًا فقط لطريقة الدفع البنكية.');
+75 |   const bank = database.prepare('SELECT account_id, status, currency FROM treasury_bank_accounts WHERE id = ?').get(bankAccountId) as Row | undefined;
+76 |   if (!bank || bank.status !== 'active') throw new Error('البنك المحدد غير موجود أو غير نشط.');
+77 |   if (String(bank.currency).toUpperCase() !== 'EGP') throw new Error('لا يمكن ترحيل عملة مختلفة لعدم توفر آلية سعر صرف معتمدة.');
+78 |   return Number(bank.account_id);
+79 | }
+80 | 
+81 | export function installFinancialDocumentSchema(database: DatabaseSync): void {
+82 |   database.exec(`
+83 |     CREATE TABLE IF NOT EXISTS financial_vouchers (
+84 |       id INTEGER PRIMARY KEY AUTOINCREMENT,
+85 |       number TEXT NOT NULL UNIQUE,
+86 |       party_kind TEXT NOT NULL CHECK (party_kind IN ('customer', 'supplier')),
+87 |       voucher_type TEXT NOT NULL CHECK (voucher_type IN ('receipt', 'payment')),
+88 |       voucher_date TEXT NOT NULL,
+89 |       customer_id INTEGER REFERENCES customers(id) ON DELETE RESTRICT,
+90 |       supplier_id INTEGER REFERENCES suppliers(id) ON DELETE RESTRICT,
+91 |       amount TEXT NOT NULL,
+92 |       payment_method TEXT NOT NULL CHECK (payment_method IN ('cash', 'bank')),
+93 |       cash_box_id INTEGER REFERENCES treasury_cash_boxes(id) ON DELETE RESTRICT,
+94 |       bank_account_id INTEGER REFERENCES treasury_bank_accounts(id) ON DELETE RESTRICT,
+95 |       cost_center_id INTEGER REFERENCES cost_centers(id) ON DELETE RESTRICT,
+96 |       project_id INTEGER REFERENCES projects(id) ON DELETE RESTRICT,
+97 |       reference TEXT NOT NULL DEFAULT '',
+98 |       notes TEXT NOT NULL DEFAULT '',
+99 |       status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'posted')),
+100 |       journal_entry_id INTEGER UNIQUE REFERENCES journal_entries(id) ON DELETE RESTRICT,
+101 |       created_at TEXT NOT NULL DEFAULT (datetime('now')),
+102 |       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+103 |       CHECK ((party_kind = 'customer' AND voucher_type = 'receipt' AND customer_id IS NOT NULL AND supplier_id IS NULL)
+104 |           OR (party_kind = 'supplier' AND voucher_type = 'payment' AND supplier_id IS NOT NULL AND customer_id IS NULL)),
+105 |       CHECK ((payment_method = 'cash' AND cash_box_id IS NOT NULL AND bank_account_id IS NULL)
+106 |           OR (payment_method = 'bank' AND bank_account_id IS NOT NULL AND cash_box_id IS NULL))
+107 |     );
+108 |     CREATE INDEX IF NOT EXISTS financial_vouchers_party_date ON financial_vouchers(party_kind, voucher_date DESC, id DESC);
+109 |     CREATE TABLE IF NOT EXISTS expenses (
+110 |       id INTEGER PRIMARY KEY AUTOINCREMENT,
+111 |       number TEXT NOT NULL UNIQUE,
+112 |       expense_date TEXT NOT NULL,
+113 |       operation_type TEXT NOT NULL,
+114 |       description TEXT NOT NULL,
+115 |       payment_method TEXT NOT NULL CHECK (payment_method IN ('cash', 'bank')),
+116 |       cash_box_id INTEGER REFERENCES treasury_cash_boxes(id) ON DELETE RESTRICT,
+117 |       bank_account_id INTEGER REFERENCES treasury_bank_accounts(id) ON DELETE RESTRICT,
+118 |       payable_account_id INTEGER REFERENCES accounts(id) ON DELETE RESTRICT,
+119 |       cost_center_id INTEGER REFERENCES cost_centers(id) ON DELETE RESTRICT,
+120 |       project_id INTEGER REFERENCES projects(id) ON DELETE RESTRICT,
+121 |       paid_amount TEXT NOT NULL,
+122 |       total_amount TEXT NOT NULL,
+123 |       currency TEXT NOT NULL DEFAULT 'EGP' CHECK (currency = 'EGP'),
+124 |       notes TEXT NOT NULL DEFAULT '',
+125 |       status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'posted')),
+126 |       journal_entry_id INTEGER UNIQUE REFERENCES journal_entries(id) ON DELETE RESTRICT,
+127 |       created_at TEXT NOT NULL DEFAULT (datetime('now')),
+128 |       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+129 |       CHECK ((payment_method = 'cash' AND (bank_account_id IS NULL)) OR (payment_method = 'bank' AND (cash_box_id IS NULL)))
+130 |     );
+131 |     CREATE INDEX IF NOT EXISTS expenses_date_status ON expenses(expense_date DESC, status, id DESC);
+132 |     CREATE TABLE IF NOT EXISTS expense_allocations (
+133 |       id INTEGER PRIMARY KEY AUTOINCREMENT,
+134 |       expense_id INTEGER NOT NULL REFERENCES expenses(id) ON DELETE CASCADE,
+135 |       expense_account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+136 |       project_id INTEGER REFERENCES projects(id) ON DELETE RESTRICT,
+137 |       cost_center_id INTEGER REFERENCES cost_centers(id) ON DELETE RESTRICT,
+138 |       amount TEXT NOT NULL,
+139 |       notes TEXT NOT NULL DEFAULT ''
+140 |     );
+141 |     CREATE INDEX IF NOT EXISTS expense_allocations_expense ON expense_allocations(expense_id, id);
+142 |   `);
+143 | }
+144 | 
+145 | function validateVoucher(database: DatabaseSync, partyKind: FinancialVoucherParty, value: unknown): FinancialVoucherInput {
+146 |   if (!value || typeof value !== 'object') throw new Error('بيانات السند غير صالحة.');
+147 |   const input = value as Partial<FinancialVoucherInput>;
+148 |   if (input.id !== undefined) validId(input.id, 'رقم السند');
+149 |   if (input.partyKind !== partyKind) throw new Error('نوع الطرف في السند غير صالح.');
+150 |   if (!validDate(input.date)) throw new Error('تاريخ السند غير صالح.');
+151 |   const partyId = validId(input.partyId, partyKind === 'customer' ? 'العميل' : 'المورد');
+152 |   if (typeof input.amount !== 'string' || parseAmount(input.amount) <= 0n) throw new Error('مبلغ السند يجب أن يكون أكبر من صفر.');
+153 |   if (input.paymentMethod !== 'cash' && input.paymentMethod !== 'bank') throw new Error('طريقة الدفع غير صالحة.');
+154 |   const cashBoxId = input.cashBoxId === null ? null : validId(input.cashBoxId, 'الخزينة');
+155 |   const bankAccountId = input.bankAccountId === null ? null : validId(input.bankAccountId, 'البنك');
+156 |   const costCenterId = input.costCenterId === null ? null : validId(input.costCenterId, 'مركز التكلفة');
+157 |   const projectId = input.projectId === null ? null : validId(input.projectId, 'المشروع');
+158 |   if (typeof input.reference !== 'string' || input.reference.length > 100) throw new Error('المرجع غير صالح.');
+159 |   if (typeof input.notes !== 'string' || input.notes.length > 2000) throw new Error('ملاحظات السند غير صالحة.');
+160 |   const party = partyKind === 'customer'
+161 |     ? database.prepare('SELECT status, account_id FROM customers WHERE id = ?').get(partyId) as Row | undefined
+162 |     : database.prepare('SELECT status, account_id FROM suppliers WHERE id = ?').get(partyId) as Row | undefined;
+163 |   if (!party || party.status !== 'active') throw new Error('العميل أو المورد المحدد غير موجود أو غير نشط.');
+164 |   if (party.account_id === null) throw new Error('اربط الطرف بحسابه المحاسبي أولًا.');
+165 |   postableAccount(database, Number(party.account_id), partyKind === 'customer' ? 'asset' : 'liability', 'حساب الطرف');
+166 |   const payoutAccountId = validatePayout(database, input.paymentMethod, cashBoxId, bankAccountId);
+167 |   postableAccount(database, payoutAccountId, 'asset', 'حساب الخزينة أو البنك');
+168 |   validateCenter(database, costCenterId);
+169 |   validateProject(database, projectId);
+170 |   return {
+171 |     ...(input.id === undefined ? {} : { id: Number(input.id) }), partyKind, date: input.date,
+172 |     partyId, amount: normalizeAmount(input.amount), paymentMethod: input.paymentMethod,
+173 |     cashBoxId, bankAccountId, costCenterId, projectId, reference: input.reference.trim(), notes: input.notes.trim(),
+174 |   };
+175 | }
+176 | 
+177 | function voucherQuery(partyKind: FinancialVoucherParty): string {
+178 |   return `SELECT vouchers.*, COALESCE(customers.code, suppliers.code, '') AS party_code,
+179 |       COALESCE(customers.name, suppliers.name, '') AS party_name,
+180 |       COALESCE(customers.account_id, suppliers.account_id) AS party_account_id,
+181 |       COALESCE(boxes.name, banks.name, '') AS payout_name,
+182 |       COALESCE(boxes.currency, banks.currency, 'EGP') AS payout_currency
+183 |     FROM financial_vouchers vouchers
+184 |     LEFT JOIN customers ON customers.id = vouchers.customer_id
+185 |     LEFT JOIN suppliers ON suppliers.id = vouchers.supplier_id
+186 |     LEFT JOIN treasury_cash_boxes boxes ON boxes.id = vouchers.cash_box_id
+187 |     LEFT JOIN treasury_bank_accounts banks ON banks.id = vouchers.bank_account_id
+188 |     WHERE vouchers.party_kind = '${partyKind}'`;
+189 | }
+190 | 
+191 | function readVoucher(database: DatabaseSync, id: number, partyKind: FinancialVoucherParty): FinancialVoucher {
+192 |   const row = database.prepare(`${voucherQuery(partyKind)} AND vouchers.id = ?`).get(id) as Row | undefined;
+193 |   if (!row) throw new Error('السند المطلوب غير موجود.');
+194 |   return {
+195 |     id: Number(row.id), number: String(row.number), partyKind,
+196 |     date: String(row.voucher_date), partyId: Number(partyKind === 'customer' ? row.customer_id : row.supplier_id),
+197 |     amount: String(row.amount), paymentMethod: String(row.payment_method) as FinancialVoucher['paymentMethod'],
+198 |     cashBoxId: row.cash_box_id === null ? null : Number(row.cash_box_id), bankAccountId: row.bank_account_id === null ? null : Number(row.bank_account_id),
+199 |     costCenterId: row.cost_center_id === null ? null : Number(row.cost_center_id), projectId: row.project_id === null ? null : Number(row.project_id),
+200 |     reference: String(row.reference), notes: String(row.notes), partyCode: String(row.party_code), partyName: String(row.party_name),

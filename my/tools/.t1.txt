@@ -1,0 +1,91 @@
+40 | export type FinancialVoucherStatus = 'draft' | 'posted';
+41 | export type FinancialPaymentMethod = 'cash' | 'bank';
+42 | export type ExpenseSettlementStatus = 'unpaid' | 'partial' | 'paid';
+43 | 
+44 | export interface FinancialVoucherInput {
+45 |   id?: number;
+46 |   partyKind: FinancialVoucherParty;
+47 |   date: string;
+48 |   partyId: number;
+49 |   amount: string;
+50 |   paymentMethod: FinancialPaymentMethod;
+51 |   cashBoxId: number | null;
+52 |   bankAccountId: number | null;
+53 |   costCenterId: number | null;
+54 |   projectId: number | null;
+55 |   reference: string;
+56 |   notes: string;
+57 | }
+58 | 
+59 | export interface FinancialVoucher extends FinancialVoucherInput {
+60 |   id: number;
+61 |   number: string;
+62 |   partyCode: string;
+63 |   partyName: string;
+64 |   partyAccountId: number;
+65 |   payoutAccountName: string;
+66 |   payoutCurrency: string;
+67 |   status: FinancialVoucherStatus;
+68 |   journalEntryId: number | null;
+69 |   createdAt: string;
+70 |   updatedAt: string;
+71 | }
+72 | 
+73 | export interface ExpenseAllocationInput {
+74 |   id?: number;
+75 |   expenseAccountId: number;
+76 |   projectId: number | null;
+77 |   costCenterId: number | null;
+78 |   amount: string;
+79 |   notes: string;
+80 | }
+81 | 
+82 | export interface ExpenseInput {
+83 |   id?: number;
+84 |   date: string;
+85 |   operationType: string;
+86 |   description: string;
+87 |   paymentMethod: FinancialPaymentMethod;
+88 |   cashBoxId: number | null;
+89 |   bankAccountId: number | null;
+90 |   payableAccountId: number | null;
+91 |   costCenterId: number | null;
+92 |   projectId: number | null;
+93 |   paidAmount: string;
+94 |   totalAmount: string;
+95 |   allocations: ExpenseAllocationInput[];
+96 |   notes: string;
+97 | }
+98 | 
+99 | export interface Expense extends ExpenseInput {
+100 |   id: number;
+101 |   number: string;
+102 |   currency: string;
+103 |   total: string;
+104 |   remaining: string;
+105 |   settlementStatus: ExpenseSettlementStatus;
+106 |   status: FinancialVoucherStatus;
+107 |   journalEntryId: number | null;
+108 |   createdAt: string;
+109 |   updatedAt: string;
+110 |   allocations: Array<ExpenseAllocationInput & { id: number; expenseAccountName: string; costCenterName: string; projectName: string }>;
+111 | }
+112 | 
+113 | export interface InventoryUnitInput {
+114 |   id?: number;
+115 |   code: string;
+116 |   nameAr: string;
+117 |   abbreviation: string;
+118 |   status: InventoryStatus;
+119 | }
+120 | 
+121 | export interface InventoryUnit extends InventoryUnitInput {
+122 |   id: number;
+123 |   itemCount: number;
+124 |   createdAt: string;
+125 |   updatedAt: string;
+126 | }
+127 | 
+128 | export interface WarehouseInput {
+129 |   id?: number;
+130 |   code: string;

@@ -1,0 +1,27 @@
+336 | function updateVoucher(database: DatabaseSync, partyKind: FinancialVoucherParty, value: unknown): FinancialVoucher {
+337 |   const input = validateVoucher(database, partyKind, value);
+338 |   const voucherType = partyKind === 'customer' ? 'receipt' : 'payment';
+339 |   return transaction(database, () => {
+340 |     let id = input.id;
+341 |     if (id !== undefined) {
+342 |       const current = database.prepare('SELECT status, party_kind FROM financial_vouchers WHERE id = ?').get(id) as Row | undefined;
+343 |       if (!current || current.party_kind !== partyKind) throw new Error('السند المطلوب غير موجود في هذه الصفحة.');
+344 |       if (current.status !== 'draft') throw new Error('لا يمكن تعديل سند مرحّل.');
+345 |       const result = database.prepare(`UPDATE financial_vouchers SET ${partyKind === 'customer' ? 'customer_id' : 'supplier_id'} = ?,
+346 |         voucher_date = ?, amount = ?, payment_method = ?, cash_box_id = ?, bank_account_id = ?, cost_center_id = ?, project_id = ?, reference = ?, notes = ?, updated_at = datetime('now') WHERE id = ?`)
+347 |         .run(input.partyId, input.date, input.amount, input.paymentMethod, input.cashBoxId, input.bankAccountId, input.costCenterId, input.projectId, input.reference, input.notes, id);
+348 |       if (!result.changes) throw new Error('لم يُعثر على السند.');
+349 |     } else {
+350 |       const result = database.prepare(`INSERT INTO financial_vouchers (number, party_kind, voucher_type, voucher_date,
+351 |         customer_id, supplier_id, amount, payment_method, cash_box_id, bank_account_id, cost_center_id, project_id, reference, notes)
+352 |         VALUES ('PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+353 |         .run(partyKind, voucherType, input.date, partyKind === 'customer' ? input.partyId : null, partyKind === 'supplier' ? input.partyId : null,
+354 |           input.amount, input.paymentMethod, input.cashBoxId, input.bankAccountId, input.costCenterId, input.projectId, input.reference, input.notes);
+355 |       id = Number(result.lastInsertRowid);
+356 |       database.prepare('UPDATE financial_vouchers SET number = ? WHERE id = ?').run(`${partyKind === 'customer' ? 'CR' : 'SP'}-${String(id).padStart(7, '0')}`, id);
+357 |     }
+358 |     const row = database.prepare(`${voucherList(database, partyKind)} AND vouchers.id = ?`).get(id) as Row;
+359 |     return mapVoucherRow(row, partyKind);
+360 |   });
+361 | }
+362 | 
